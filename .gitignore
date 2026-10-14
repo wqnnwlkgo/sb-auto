@@ -1,0 +1,20 @@
+# 运行时生成的文件（只在 VPS 上产生，不该进仓库）
+sbyg_update
+*.log
+*.txt
+*.json
+cert.pem
+cert.crt
+private.key
+public.key
+SHA256.txt
+/etc/
+ygkkkca/
+
+# 系统 / 编辑器垃圾
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/

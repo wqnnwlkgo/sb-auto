@@ -2523,6 +2523,11 @@ openyn
 inssb
 inscertificate
 insport
+if [[ "$AUTO" == "1" ]]; then
+while :; do port_hy2=$(shuf -i 50000-60000 -n 1); [[ -z $(ss -tunlp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port_hy2") ]] && break; done
+while :; do port_tu=$(shuf -i 40000-49999 -n 1); [[ -z $(ss -tunlp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port_tu") ]] && break; done
+blue "自动模式已将Hy2主端口固定在跳跃段内：$port_hy2，Tuic主端口固定在跳跃段内：$port_tu"
+fi
 sleep 2
 echo
 blue "Vless-reality相关key与id将自动生成……"
@@ -2539,6 +2544,16 @@ warpwg
 inssbjsonser
 sbservice
 sbactive
+if [[ "$AUTO" == "1" ]]; then
+iptables -t nat -A PREROUTING -p udp --dport 50000:60000 -j DNAT --to-destination :$port_hy2 2>/dev/null
+ip6tables -t nat -A PREROUTING -p udp --dport 50000:60000 -j DNAT --to-destination :$port_hy2 2>/dev/null
+iptables -t nat -A PREROUTING -p udp --dport 40000:49999 -j DNAT --to-destination :$port_tu 2>/dev/null
+ip6tables -t nat -A PREROUTING -p udp --dport 40000:49999 -j DNAT --to-destination :$port_tu 2>/dev/null
+netfilter-persistent save >/dev/null 2>&1
+service iptables save >/dev/null 2>&1
+blue "已自动为Hysteria2添加端口跳跃范围：50000-60000"
+blue "已自动为Tuic5添加端口跳跃范围：40000-49999"
+fi
 #curl -sL https://gitlab.com/rwkgyg/sing-box-yg/-/raw/main/version/version | awk -F "更新内容" '{print $1}' | head -n 1 > /etc/s-box/v
 curl -sL https://raw.githubusercontent.com/yonggekkk/sing-box-yg/main/version | awk -F "更新内容" '{print $1}' | head -n 1 > /etc/s-box/v
 red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
