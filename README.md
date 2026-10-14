@@ -2,6 +2,22 @@
 
 Sing-box 一键安装 / 管理脚本，支持 Vless-reality、Vmess-ws、Hysteria2、Tuic-v5、Anytls 等协议，自动签发自签/Acme 证书，集成 WARP 分流。
 
+## VPS 专用一键脚本
+
+快捷方式 `sb`：
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/wqnnwlkgo/sb-auto/main/sb-auto.sh)
+```
+
+或者：
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/wqnnwlkgo/sb-auto/main/sb-auto.sh)
+```
+
+> 安装完成后，直接输入 `sb` 即可再次打开管理菜单。
+
 ## 支持系统
 
 - Ubuntu / Debian / CentOS（含基于 apt/yum/dnf 的发行版）
