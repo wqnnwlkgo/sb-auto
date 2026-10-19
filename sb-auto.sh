@@ -495,11 +495,7 @@ cat > /etc/s-box/sb10.json <<EOF
             {
                 "password": "${uuid}"
             }
-        ],
-        "obfs": {
-            "type": "salamander",
-            "password": "${hy2_obfs}"
-        },
+        ], "obfs": {"type": "salamander", "password": "${hy2_obfs}"},
         "ignore_client_bandwidth":false,
         "tls": {
             "enabled": true,
@@ -743,11 +739,7 @@ cat > /etc/s-box/sb11.json <<EOF
             {
                 "password": "${uuid}"
             }
-        ],
-        "obfs": {
-            "type": "salamander",
-            "password": "${hy2_obfs}"
-        },
+        ], "obfs": {"type": "salamander", "password": "${hy2_obfs}"},
         "ignore_client_bandwidth":false,
         "tls": {
             "enabled": true,

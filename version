@@ -1,4 +1,4 @@
-1.0.1
+1.0.2
 更新内容：
-1、Hysteria2 默认开启 Salamander 混淆（新安装生效）
+1、修复：混淆配置导致按行号修改配置（改端口/换证书/分流）错位；Hysteria2 默认开启 Salamander 混淆（新安装生效）
 2、sb 快捷方式与脚本升级改为指向 wqnnwlkgo/sb-auto 仓库
