@@ -417,6 +417,8 @@ red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 green "四、自动生成各个协议统一的uuid (密码)"
 uuid=$(/etc/s-box/sing-box generate uuid)
 blue "已确认uuid (密码)：${uuid}"
+hy2_obfs=$(openssl rand -hex 16)
+blue "已确认Hysteria2的Salamander混淆密码：${hy2_obfs}"
 blue "已确认Vmess的path路径：${uuid}-vm"
 }
 
@@ -494,6 +496,10 @@ cat > /etc/s-box/sb10.json <<EOF
                 "password": "${uuid}"
             }
         ],
+        "obfs": {
+            "type": "salamander",
+            "password": "${hy2_obfs}"
+        },
         "ignore_client_bandwidth":false,
         "tls": {
             "enabled": true,
@@ -738,6 +744,10 @@ cat > /etc/s-box/sb11.json <<EOF
                 "password": "${uuid}"
             }
         ],
+        "obfs": {
+            "type": "salamander",
+            "password": "${hy2_obfs}"
+        },
         "ignore_client_bandwidth":false,
         "tls": {
             "enabled": true,
@@ -1026,6 +1036,12 @@ else
 vmadd_argo=cloudflare-ech.com
 fi
 hy2_port=$(sed 's://.*::g' /etc/s-box/sb.json | jq -r '.inbounds[2].listen_port')
+hy2_obfs=$(sed 's://.*::g' /etc/s-box/sb.json | jq -r '.inbounds[2].obfs.password // empty')
+if [[ -n $hy2_obfs ]]; then
+hyobfs="&obfs=salamander&obfs-password=$hy2_obfs"
+else
+hyobfs=
+fi
 hy2_ports=$(iptables -t nat -nL --line 2>/dev/null | grep -w "$hy2_port" | awk '{print $8}' | sed 's/dpts://; s/dpt://' | tr '\n' ',' | sed 's/,$//')
 if [[ -n $hy2_ports ]]; then
 cmhy2pt=$(echo $hy2_ports | tr ':' '-')
@@ -1158,7 +1174,7 @@ echo
 reshy2(){
 echo
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-hy2_link="hysteria2://$uuid@$sb_hy2_ip:$hy2_port?security=tls&alpn=h3&insecure=0&allowInsecure=0$hyps&sni=$hy2_name&pinSHA256=$SHA256#hy2-$hostname"
+hy2_link="hysteria2://$uuid@$sb_hy2_ip:$hy2_port?security=tls&alpn=h3&insecure=0&allowInsecure=0$hyps$hyobfs&sni=$hy2_name&pinSHA256=$SHA256#hy2-$hostname"
 #hy2_link="hysteria2://$uuid@$sb_hy2_ip:$hy2_port?security=tls&alpn=h3&insecure=$ins_hy2&allowInsecure=$ins_hy2$hyps&sni=$hy2_name#hy2-$hostname"
 echo "$hy2_link" > /etc/s-box/hy2.txt
 red "🚀【 Hysteria-2 】节点信息如下：" && sleep 2
@@ -1211,6 +1227,24 @@ if [[ -n $hy2_ports ]]; then
     cat <<EOF
   "server_ports": [ $sbhy2pt ],
 EOF
+fi
+}
+
+sbhy2obfs(){
+if [[ -n $hy2_obfs ]]; then
+    cat <<EOF
+  "obfs": {
+    "type": "salamander",
+    "password": "$hy2_obfs"
+  },
+EOF
+fi
+}
+
+clhy2obfs(){
+if [[ -n $hy2_obfs ]]; then
+    echo "  obfs: salamander"
+    echo "  obfs-password: $hy2_obfs"
 fi
 }
 
@@ -1472,6 +1506,7 @@ cat <<EOF
         "server": "$cl_hy2_ip",
         "server_port": $hy2_port,
 $(sbhy2ports)
+$(sbhy2obfs)
         "password": "$uuid",
         "tls": {
             "enabled": true,
@@ -1582,6 +1617,7 @@ proxies:
   port: $hy2_port
   ports: $cmhy2pt
   password: $uuid                          
+$(clhy2obfs)
   alpn:
     - h3
   sni: $hy2_name                               
