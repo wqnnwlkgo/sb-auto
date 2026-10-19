@@ -311,14 +311,25 @@ chmod +x /etc/local.d/sbfw.start
 fi
 }
 
+sbnatclr(){
+for t in iptables ip6tables; do
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-p udp .*--dport $1 -j DNAT" | while read -r r; do
+$t -t nat -D ${r#-A } >/dev/null 2>&1
+done
+done
+}
+
 sbnatdel(){
 natre=$(sbnatre)
-[[ -n $natre ]] || return 0
+if [[ -n $natre ]]; then
 for t in iptables ip6tables; do
 $t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-j DNAT --to-destination :($natre)$" | while read -r r; do
 $t -t nat -D ${r#-A } >/dev/null 2>&1
 done
 done
+fi
+sbnatclr 50000:60000
+sbnatclr 40000:49999
 netfilter-persistent save >/dev/null 2>&1
 service iptables save >/dev/null 2>&1
 }
@@ -2754,6 +2765,8 @@ inssbjsonser
 sbservice
 sbactive
 if [[ "$AUTO" == "1" ]]; then
+sbnatclr 50000:60000
+sbnatclr 40000:49999
 iptables -t nat -A PREROUTING -p udp --dport 50000:60000 -j DNAT --to-destination :$port_hy2 2>/dev/null
 ip6tables -t nat -A PREROUTING -p udp --dport 50000:60000 -j DNAT --to-destination :$port_hy2 2>/dev/null
 iptables -t nat -A PREROUTING -p udp --dport 40000:49999 -j DNAT --to-destination :$port_tu 2>/dev/null
@@ -2926,6 +2939,7 @@ if [[ $rangeport =~ ^([1-9][0-9]{3,4}:[1-9][0-9]{3,4})$ ]]; then
 b=${rangeport%%:*}
 c=${rangeport##*:}
 if [[ $b -ge 1000 && $b -le 65535 && $c -ge 1000 && $c -le 65535 && $b -lt $c ]]; then
+sbnatclr $rangeport
 iptables -t nat -A PREROUTING -p udp --dport $rangeport -j DNAT --to-destination :$port
 ip6tables -t nat -A PREROUTING -p udp --dport $rangeport -j DNAT --to-destination :$port
 sbfwsave
@@ -2941,6 +2955,7 @@ echo
 fport(){
 readp "\n请输入一个转发的端口 (1000-65535范围内)：" onlyport
 if [[ $onlyport -ge 1000 && $onlyport -le 65535 ]]; then
+sbnatclr $onlyport
 iptables -t nat -A PREROUTING -p udp --dport $onlyport -j DNAT --to-destination :$port
 ip6tables -t nat -A PREROUTING -p udp --dport $onlyport -j DNAT --to-destination :$port
 sbfwsave
