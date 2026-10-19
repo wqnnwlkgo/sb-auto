@@ -493,19 +493,6 @@ readp "\n设置Hysteria2主端口 (回车跳过为10000-65535之间的随机端�
 chooseport
 port_hy2=$port
 }
-hy2bw(){
-readp "\n设置Hysteria2客户端上行带宽Mbps (按本地真实上行的80%左右填写，回车跳过则不设置、使用BBR)：" hy2_up
-if [[ -n "$hy2_up" && ! "$hy2_up" =~ ^[1-9][0-9]*$ ]]; then yellow "输入无效，已跳过"; hy2_up=; fi
-readp "\n设置Hysteria2客户端下行带宽Mbps (按本地真实下行的80%左右填写，回车跳过则不设置、使用BBR)：" hy2_down
-if [[ -n "$hy2_down" && ! "$hy2_down" =~ ^[1-9][0-9]*$ ]]; then yellow "输入无效，已跳过"; hy2_down=; fi
-if [[ -n "$hy2_up" && -n "$hy2_down" ]]; then
-echo "$hy2_up $hy2_down" > /etc/s-box/hy2_bw.txt
-blue "已设置Hysteria2客户端带宽：上行 $hy2_up Mbps，下行 $hy2_down Mbps"
-else
-rm -f /etc/s-box/hy2_bw.txt
-yellow "未设置Hysteria2客户端带宽，将使用BBR"
-fi
-}
 tu5port(){
 readp "\n设置Tuic5主端口 (回车跳过为10000-65535之间的随机端口)：" port
 chooseport
@@ -1203,12 +1190,11 @@ else
 hyps=
 fi
 hy2_hop=15
+hy2_up=50
+hy2_down=200
 if [[ -s /etc/s-box/hy2_bw.txt ]]; then
 hy2_up=$(awk '{print $1}' /etc/s-box/hy2_bw.txt)
 hy2_down=$(awk '{print $2}' /etc/s-box/hy2_bw.txt)
-else
-hy2_up=
-hy2_down=
 fi
 ym=$(cat /root/ygkkkca/ca.log 2>/dev/null)
 hy2_sniname=$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds[2].tls.key_path')
@@ -2742,7 +2728,6 @@ openyn
 inssb
 inscertificate
 insport
-hy2bw
 if [[ "$AUTO" == "1" ]]; then
 while :; do port_hy2=$(shuf -i 50000-60000 -n 1); [[ -z $(ss -tunlp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port_hy2") ]] && break; done
 while :; do port_tu=$(shuf -i 40000-49999 -n 1); [[ -z $(ss -tunlp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port_tu") ]] && break; done
