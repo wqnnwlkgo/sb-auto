@@ -1320,7 +1320,10 @@ echo
 reshy2(){
 echo
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-hy2_link="hysteria2://$uuid@$sb_hy2_ip:$hy2_port?security=tls&alpn=h3&insecure=0&allowInsecure=0$hyps$hyobfs&sni=$hy2_name&pinSHA256=$SHA256#hy2-$hostname"
+hyext=
+[[ -n $hyps ]] && hyext="&hop-interval=$hy2_hop"
+[[ -n $hy2_up && -n $hy2_down ]] && hyext="$hyext&upmbps=$hy2_up&downmbps=$hy2_down"
+hy2_link="hysteria2://$uuid@$sb_hy2_ip:$hy2_port?security=tls&alpn=h3&insecure=0&allowInsecure=0$hyps$hyext$hyobfs&sni=$hy2_name&pinSHA256=$SHA256#hy2-$hostname"
 #hy2_link="hysteria2://$uuid@$sb_hy2_ip:$hy2_port?security=tls&alpn=h3&insecure=$ins_hy2&allowInsecure=$ins_hy2$hyps&sni=$hy2_name#hy2-$hostname"
 echo "$hy2_link" > /etc/s-box/hy2.txt
 red "🚀【 Hysteria-2 】节点信息如下：" && sleep 2
