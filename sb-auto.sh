@@ -77,7 +77,11 @@ cd
 fi
 if [ -x "$(command -v apt-get)" ]; then
 apt update -y
+if command -v ufw >/dev/null 2>&1; then
+apt install jq cron socat busybox coreutils util-linux -y
+else
 apt install jq cron socat busybox iptables-persistent coreutils util-linux -y
+fi
 elif [ -x "$(command -v yum)" ]; then
 yum update -y && yum install epel-release -y
 yum install jq socat busybox coreutils util-linux -y
@@ -86,13 +90,25 @@ dnf update -y
 dnf install jq socat busybox coreutils util-linux -y
 fi
 if [ -x "$(command -v yum)" ] || [ -x "$(command -v dnf)" ]; then
+if systemctl is-active --quiet firewalld 2>/dev/null; then
+if [ -x "$(command -v yum)" ]; then
+yum install -y cronie
+elif [ -x "$(command -v dnf)" ]; then
+dnf install -y cronie
+fi
+else
 if [ -x "$(command -v yum)" ]; then
 yum install -y cronie iptables-services
 elif [ -x "$(command -v dnf)" ]; then
 dnf install -y cronie iptables-services
 fi
+if ! systemctl is-enabled --quiet iptables 2>/dev/null; then
+iptables-save > /etc/sysconfig/iptables 2>/dev/null
+ip6tables-save > /etc/sysconfig/ip6tables 2>/dev/null
+fi
 systemctl enable iptables >/dev/null 2>&1
 systemctl start iptables >/dev/null 2>&1
+fi
 fi
 if [[ -z $vi ]]; then
 apt install iputils-ping iproute2 systemctl -y
@@ -187,26 +203,145 @@ iptables -t mangle -F >/dev/null 2>&1
 iptables -F >/dev/null 2>&1
 iptables -X >/dev/null 2>&1
 netfilter-persistent save >/dev/null 2>&1
-if [[ -n $(apachectl -v 2>/dev/null) ]]; then
-systemctl stop httpd.service >/dev/null 2>&1
-systemctl disable httpd.service >/dev/null 2>&1
-service apache2 stop >/dev/null 2>&1
-systemctl disable apache2 >/dev/null 2>&1
-fi
 sleep 1
 green "执行开放端口，关闭防火墙完毕"
 }
 
+btpanel(){
+[[ -d /www/server/panel ]]
+}
+
+fwtool(){
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+echo ufw
+elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+echo firewalld
+else
+echo iptables
+fi
+}
+
+sbmainports(){
+sed 's://.*::g' /etc/s-box/sb.json 2>/dev/null | jq -r '.inbounds[] | select(.listen_port != null) | "\(.type) \(.listen_port)"' 2>/dev/null | while read -r type p; do
+case $type in
+hysteria2|tuic) echo "udp $p";;
+vless|vmess|anytls) echo "tcp $p";;
+esac
+done
+}
+
+sbfwopen(){
+tool=$(fwtool)
+: > /etc/s-box/fw_ports.log
+while read -r proto p; do
+case $tool in
+ufw) ufw status 2>/dev/null | grep -qE "^$p/$proto[[:space:]]" && continue
+ufw allow $p/$proto comment 'sb-auto' >/dev/null 2>&1;;
+firewalld) firewall-cmd --permanent --query-port=$p/$proto >/dev/null 2>&1 && continue
+firewall-cmd --permanent --add-port=$p/$proto >/dev/null 2>&1;;
+*) for t in iptables ip6tables; do
+$t -C INPUT -p $proto --dport $p -m comment --comment sb-auto -j ACCEPT >/dev/null 2>&1 || $t -I INPUT -p $proto --dport $p -m comment --comment sb-auto -j ACCEPT >/dev/null 2>&1
+done;;
+esac
+echo "$tool $proto $p" >> /etc/s-box/fw_ports.log
+done < <(sbmainports)
+sbfwsave
+[[ $tool = firewalld ]] && firewall-cmd --reload >/dev/null 2>&1 && bash /etc/s-box/sbfw.sh
+blue "已通过 $tool 放行端口：$(sbmainports | awk '{print $2"/"$1}' | paste -sd' ')"
+if btpanel; then
+yellow "检测到宝塔面板：请在宝塔【安全】页面同样放行以上端口，以免宝塔同步防火墙规则时被覆盖"
+fi
+}
+
+sbfwclose(){
+[[ -f /etc/s-box/fw_ports.log ]] || return 0
+reload=
+while read -r tool proto p; do
+case $tool in
+ufw) ufw delete allow $p/$proto >/dev/null 2>&1;;
+firewalld) firewall-cmd --permanent --remove-port=$p/$proto >/dev/null 2>&1; reload=1;;
+*) for t in iptables ip6tables; do
+while $t -D INPUT -p $proto --dport $p -m comment --comment sb-auto -j ACCEPT >/dev/null 2>&1; do :; done
+done;;
+esac
+done < /etc/s-box/fw_ports.log
+[[ -n $reload ]] && firewall-cmd --reload >/dev/null 2>&1 && [[ -f /etc/s-box/sbfw.sh ]] && bash /etc/s-box/sbfw.sh
+rm -f /etc/s-box/fw_ports.log
+}
+
+sbfwre(){
+if [[ "$(cat /etc/s-box/fwmode 2>/dev/null)" = "1" ]]; then
+sbfwclose
+sbfwopen
+else
+sbfwsave
+fi
+}
+
+sbnatre(){
+hp=$(sed 's://.*::g' /etc/s-box/sb.json 2>/dev/null | jq -r '.inbounds[2].listen_port // empty' 2>/dev/null)
+tp=$(sed 's://.*::g' /etc/s-box/sb.json 2>/dev/null | jq -r '.inbounds[3].listen_port // empty' 2>/dev/null)
+echo "$hp $tp" | xargs | tr ' ' '|'
+}
+
+sbfwsave(){
+netfilter-persistent save >/dev/null 2>&1
+service iptables save >/dev/null 2>&1
+[[ -d /etc/s-box ]] || return 0
+natre=$(sbnatre)
+{
+echo '#!/bin/bash'
+for t in iptables ip6tables; do
+if [[ -n $natre ]]; then
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-j DNAT --to-destination :($natre)$" | while read -r r; do
+r=${r#-A }
+echo "$t -t nat -C $r >/dev/null 2>&1 || $t -t nat -A $r >/dev/null 2>&1"
+done
+fi
+$t -S INPUT 2>/dev/null | grep -- '--comment sb-auto' | while read -r r; do
+r=${r#-A }
+echo "$t -C $r >/dev/null 2>&1 || $t -I $r >/dev/null 2>&1"
+done
+done
+} > /etc/s-box/sbfw.sh
+chmod +x /etc/s-box/sbfw.sh
+if command -v apk >/dev/null 2>&1 && [[ -d /etc/local.d ]]; then
+printf '#!/bin/sh\nbash /etc/s-box/sbfw.sh\n' > /etc/local.d/sbfw.start
+chmod +x /etc/local.d/sbfw.start
+fi
+}
+
+sbnatdel(){
+natre=$(sbnatre)
+[[ -n $natre ]] || return 0
+for t in iptables ip6tables; do
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-j DNAT --to-destination :($natre)$" | while read -r r; do
+$t -t nat -D ${r#-A } >/dev/null 2>&1
+done
+done
+netfilter-persistent save >/dev/null 2>&1
+service iptables save >/dev/null 2>&1
+}
+
 openyn(){
 red "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-readp "是否开放端口，关闭防火墙？\n1、是，执行 (回车默认)\n2、否，跳过！自行处理\n请选择【1-2】：" action
+readp "防火墙处理方式？\n1、只放行脚本所需端口，保留现有防火墙 (回车默认，推荐)\n2、跳过，自行处理\n3、完全关闭防火墙并清空iptables规则 (会破坏宝塔等面板的防火墙)\n请选择【1-3】：" action
 if [[ -z $action ]] || [[ "$action" = "1" ]]; then
-close
+fwact=1
 elif [[ "$action" = "2" ]]; then
-echo
+fwact=2
+elif [[ "$action" = "3" ]]; then
+if btpanel; then
+red "检测到宝塔面板，完全关闭防火墙会清空宝塔的防火墙规则！"
+readp "确认仍要完全关闭？输入 yes 确认，其它任意键返回：" confirm
+[[ "$confirm" != "yes" ]] && openyn && return
+fi
+fwact=3
+close
 else
 red "输入错误,请重新选择" && openyn
 fi
+echo "$fwact" > /etc/s-box/fwmode
 }
 
 inssb(){
@@ -300,6 +435,7 @@ else
 green "是否申请一个Acme域名IP证书？"
 yellow "1：否！继续使用自签的证书 (回车默认)"
 yellow "2：是！使用Acme-yg脚本申请Acme证书 (支持80端口域名IP证书模式与Dns API域名模式)"
+btpanel && yellow "提示：检测到宝塔面板，80端口通常被宝塔Nginx占用，建议选择Dns API模式，或继续使用自签证书"
 readp "请选择【1-2】：" menu
 if [ -z "$menu" ] || [ "$menu" = "1" ] ; then
 zqzs
@@ -2577,10 +2713,14 @@ iptables -t nat -A PREROUTING -p udp --dport 50000:60000 -j DNAT --to-destinatio
 ip6tables -t nat -A PREROUTING -p udp --dport 50000:60000 -j DNAT --to-destination :$port_hy2 2>/dev/null
 iptables -t nat -A PREROUTING -p udp --dport 40000:49999 -j DNAT --to-destination :$port_tu 2>/dev/null
 ip6tables -t nat -A PREROUTING -p udp --dport 40000:49999 -j DNAT --to-destination :$port_tu 2>/dev/null
-netfilter-persistent save >/dev/null 2>&1
-service iptables save >/dev/null 2>&1
+sbfwsave
 blue "已自动为Hysteria2添加端口跳跃范围：50000-60000"
 blue "已自动为Tuic5添加端口跳跃范围：40000-49999"
+fi
+if [[ "$fwact" = "1" ]]; then
+sbfwopen
+else
+sbfwsave
 fi
 #curl -sL https://gitlab.com/rwkgyg/sing-box-yg/-/raw/main/version/version | awk -F "更新内容" '{print $1}' | head -n 1 > /etc/s-box/v
 curl -sL https://raw.githubusercontent.com/wqnnwlkgo/sb-auto/main/version | awk -F "更新内容" '{print $1}' | head -n 1 > /etc/s-box/v
@@ -2743,8 +2883,7 @@ c=${rangeport##*:}
 if [[ $b -ge 1000 && $b -le 65535 && $c -ge 1000 && $c -le 65535 && $b -lt $c ]]; then
 iptables -t nat -A PREROUTING -p udp --dport $rangeport -j DNAT --to-destination :$port
 ip6tables -t nat -A PREROUTING -p udp --dport $rangeport -j DNAT --to-destination :$port
-netfilter-persistent save >/dev/null 2>&1
-service iptables save >/dev/null 2>&1
+sbfwsave
 blue "已确认转发的端口范围：$rangeport"
 else
 red "输入的端口范围不在有效范围内" && fports
@@ -2759,8 +2898,7 @@ readp "\n请输入一个转发的端口 (1000-65535范围内)：" onlyport
 if [[ $onlyport -ge 1000 && $onlyport -le 65535 ]]; then
 iptables -t nat -A PREROUTING -p udp --dport $onlyport -j DNAT --to-destination :$port
 ip6tables -t nat -A PREROUTING -p udp --dport $onlyport -j DNAT --to-destination :$port
-netfilter-persistent save >/dev/null 2>&1
-service iptables save >/dev/null 2>&1
+sbfwsave
 blue "已确认转发的端口：$onlyport"
 else
 blue "输入的端口不在有效范围内" && fport
@@ -2776,8 +2914,7 @@ for port in "${ports[@]}"; do
 iptables -t nat -D PREROUTING -p udp --dport $port -j DNAT --to-destination :$hy2_port
 ip6tables -t nat -D PREROUTING -p udp --dport $port -j DNAT --to-destination :$hy2_port
 done
-netfilter-persistent save >/dev/null 2>&1
-service iptables save >/dev/null 2>&1
+sbfwsave
 }
 tu5deports(){
 allports
@@ -2787,8 +2924,7 @@ for port in "${ports[@]}"; do
 iptables -t nat -D PREROUTING -p udp --dport $port -j DNAT --to-destination :$tu5_port
 ip6tables -t nat -D PREROUTING -p udp --dport $port -j DNAT --to-destination :$tu5_port
 done
-netfilter-persistent save >/dev/null 2>&1
-service iptables save >/dev/null 2>&1
+sbfwsave
 }
 
 allports
@@ -2808,18 +2944,21 @@ readp "请选择要变更端口的协议：" menu
 if [ "$menu" = "1" ]; then
 vlport
 echo $sbfiles | xargs -n1 sed -i "14s/$vl_port/$port_vl_re/"
+sbfwre
 restartsb && sbshare > /dev/null 2>&1
 blue "Vless-reality端口更改完成"
 echo
 elif [ "$menu" = "5" ]; then
 anport
 echo $sbfiles | xargs -n1 sed -i "110s/$an_port/$port_an/"
+sbfwre
 restartsb && sbshare > /dev/null 2>&1
 blue "Anytls端口更改完成"
 echo
 elif [ "$menu" = "2" ]; then
 vmport
 echo $sbfiles | xargs -n1 sed -i "41s/$vm_port/$port_vm_ws/"
+sbfwre
 restartsb && sbshare > /dev/null 2>&1
 blue "Vmess-ws端口更改完成"
 tls=$(sed 's://.*::g' /etc/s-box/sb.json | jq -r '.inbounds[1].tls.enabled')
@@ -2840,10 +2979,12 @@ if [ -n "$hy2_ports" ]; then
 hy2deports
 hy2port
 echo $sbfiles | xargs -n1 sed -i "67s/$hy2_port/$port_hy2/"
+sbfwre
 restartsb && sbshare > /dev/null 2>&1
 else
 hy2port
 echo $sbfiles | xargs -n1 sed -i "67s/$hy2_port/$port_hy2/"
+sbfwre
 restartsb && sbshare > /dev/null 2>&1
 fi
 blue "Hysteria2端口更改完成"
@@ -2881,10 +3022,12 @@ if [ -n "$tu5_ports" ]; then
 tu5deports
 tu5port
 echo $sbfiles | xargs -n1 sed -i "89s/$tu5_port/$port_tu/"
+sbfwre
 restartsb && sbshare > /dev/null 2>&1
 else
 tu5port
 echo $sbfiles | xargs -n1 sed -i "89s/$tu5_port/$port_tu/"
+sbfwre
 restartsb && sbshare > /dev/null 2>&1
 fi
 blue "Tuic5端口更改完成"
@@ -3853,6 +3996,7 @@ cronsb(){
 uncronsb
 crontab -l 2>/dev/null > /tmp/crontab.tmp
 echo "0 1 * * * systemctl restart sing-box;rc-service sing-box restart" >> /tmp/crontab.tmp
+[[ -f /etc/s-box/sbfw.sh ]] && ! command -v apk >/dev/null 2>&1 && echo "@reboot sleep 10 && bash /etc/s-box/sbfw.sh >/dev/null 2>&1" >> /tmp/crontab.tmp
 crontab /tmp/crontab.tmp >/dev/null 2>&1
 rm /tmp/crontab.tmp
 }
@@ -3862,6 +4006,7 @@ sed -i '/sing-box/d' /tmp/crontab.tmp
 sed -i '/sbwpph/d' /tmp/crontab.tmp
 sed -i '/url http/d' /tmp/crontab.tmp
 sed -i '/websbox/d' /tmp/crontab.tmp
+sed -i '/sbfw/d' /tmp/crontab.tmp
 crontab /tmp/crontab.tmp >/dev/null 2>&1
 rm /tmp/crontab.tmp
 }
@@ -3945,6 +4090,9 @@ fi
 }
 
 unins(){
+sbfwclose
+sbnatdel
+rm -f /etc/local.d/sbfw.start
 if command -v apk >/dev/null 2>&1; then
 for svc in sing-box argo; do
 rc-service "$svc" stop >/dev/null 2>&1
@@ -3964,9 +4112,6 @@ kill -15 $(pgrep -f 'websbox' 2>/dev/null) >/dev/null 2>&1
 rm -rf /etc/s-box sbyg_update /usr/bin/sb /root/geoip.db /root/geosite.db /root/warpapi /root/warpip /root/websbox
 rm -f /etc/local.d/alpineargo.start /etc/local.d/alpinesub.start /etc/local.d/alpinews5.start
 uncronsb
-iptables -t nat -F PREROUTING >/dev/null 2>&1
-netfilter-persistent save >/dev/null 2>&1
-service iptables save >/dev/null 2>&1
 green "Sing-box卸载完成！"
 blue "欢迎继续使用Sing-box-yg脚本：bash <(curl -Ls https://raw.githubusercontent.com/wqnnwlkgo/sb-auto/main/sb-auto.sh)"
 echo

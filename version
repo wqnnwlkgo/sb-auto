@@ -1,4 +1,7 @@
-1.0.2
+1.1.0
 更新内容：
-1、修复：混淆配置导致按行号修改配置（改端口/换证书/分流）错位；Hysteria2 默认开启 Salamander 混淆（新安装生效）
-2、sb 快捷方式与脚本升级改为指向 wqnnwlkgo/sb-auto 仓库
+1、防火墙默认改为只放行脚本所需端口（ufw/firewalld/iptables），不再关闭防火墙、不再清空iptables、不再停用Apache
+2、Debian/Ubuntu 已装 ufw 时不安装 iptables-persistent；CentOS 运行 firewalld 时不启用 iptables 服务
+3、端口跳跃规则改用 /etc/s-box/sbfw.sh 开机恢复；卸载时只删除脚本自己添加的转发与放行规则
+4、菜单改端口时自动同步放行；检测到宝塔面板时给出提示
+5、修复：混淆配置导致按行号修改配置错位
