@@ -1,0 +1,4 @@
+1.0.1
+更新内容：
+1、Hysteria2 默认开启 Salamander 混淆（新安装生效）
+2、sb 快捷方式与脚本升级改为指向 wqnnwlkgo/sb-auto 仓库
