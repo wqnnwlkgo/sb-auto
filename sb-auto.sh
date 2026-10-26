@@ -308,7 +308,30 @@ chmod +x /etc/s-box/sbfw.sh
 if command -v apk >/dev/null 2>&1 && [[ -d /etc/local.d ]]; then
 printf '#!/bin/sh\nbash /etc/s-box/sbfw.sh\n' > /etc/local.d/sbfw.start
 chmod +x /etc/local.d/sbfw.start
+rc-update add local default >/dev/null 2>&1
 fi
+}
+
+sbnatports(){
+iptables -t nat -S PREROUTING 2>/dev/null | grep -E -- "-p udp .*-j DNAT --to-destination :$1$" | grep -oE -- '--dport [0-9:]+' | awk '{print $2}' | paste -sd,
+}
+
+sbnatconflict(){
+while read -r nproto np; do
+if [[ $nproto = udp && $np != "$3" && $np -ge $1 && $np -le $2 ]]; then
+echo "端口 $np 是其他协议的主端口"
+return 0
+fi
+done < <(sbmainports)
+while read -r nr nt; do
+ns=${nr%%:*}
+ne=${nr##*:}
+if [[ $nt != "$3" && $ns -le $2 && $ne -ge $1 ]]; then
+echo "与已有的转发端口 $nr (转发到 $nt) 重叠"
+return 0
+fi
+done < <(iptables -t nat -S PREROUTING 2>/dev/null | grep -E -- '-p udp .*-j DNAT --to-destination :[0-9]+$' | sed -E 's/.*--dport ([0-9:]+) .*--to-destination :([0-9]+)$/\1 \2/')
+return 1
 }
 
 sbnatclr(){
@@ -462,20 +485,37 @@ fi
 fi
 }
 
+portused(){
+[[ -n $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") || -n $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]]
+}
+
+portnat(){
+[[ $udpchk = 1 ]] && natmsg=$(sbnatconflict $port $port)
+}
+
 chooseport(){
+while :; do
 if [[ -z $port ]]; then
 port=$(shuf -i 10000-65535 -n 1)
-until [[ -z $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") && -z $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]] 
-do
-[[ -n $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") || -n $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]] && yellow "\n端口被占用，请重新输入端口" && readp "自定义端口:" port
-done
-else
-until [[ -z $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") && -z $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]]
-do
-[[ -n $(ss -tunlp | grep -w udp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") || -n $(ss -tunlp | grep -w tcp | awk '{print $5}' | sed 's/.*://g' | grep -w "$port") ]] && yellow "\n端口被占用，请重新输入端口" && readp "自定义端口:" port
-done
+while portnat; do port=$(shuf -i 10000-65535 -n 1); done
 fi
+if ! [[ $port =~ ^[1-9][0-9]{0,4}$ && $port -le 65535 ]]; then
+yellow "\n端口必须是 1-65535 之间的数字，请重新输入端口" && readp "自定义端口:" port
+elif portused; then
+yellow "\n端口被占用，请重新输入端口" && readp "自定义端口:" port
+elif portnat; then
+yellow "\n端口 $port 不可用：$natmsg" && readp "自定义端口:" port
+else
+break
+fi
+done
 blue "确认的端口：$port" && sleep 2
+}
+
+chooseudpport(){
+udpchk=1
+chooseport
+udpchk=
 }
 
 vlport(){
@@ -490,12 +530,12 @@ port_vm_ws=$port
 }
 hy2port(){
 readp "\n设置Hysteria2主端口 (回车跳过为10000-65535之间的随机端口)：" port
-chooseport
+chooseudpport
 port_hy2=$port
 }
 tu5port(){
 readp "\n设置Tuic5主端口 (回车跳过为10000-65535之间的随机端口)：" port
-chooseport
+chooseudpport
 port_tu=$port
 }
 anport(){
@@ -1181,13 +1221,15 @@ hyobfs="&obfs=salamander&obfs-password=$hy2_obfs"
 else
 hyobfs=
 fi
-hy2_ports=$(iptables -t nat -nL --line 2>/dev/null | grep -w "$hy2_port" | awk '{print $8}' | sed 's/dpts://; s/dpt://' | tr '\n' ',' | sed 's/,$//')
+hy2_ports=$(sbnatports "$hy2_port")
 if [[ -n $hy2_ports ]]; then
 cmhy2pt=$(echo $hy2_ports | tr ':' '-')
 hyps="&mport=$cmhy2pt"
-sbhy2pt=$(echo "$hy2_ports" | grep -o '[0-9]\+:[0-9]\+' | sed 's/.*/"&"/' | paste -sd,)
+sbhy2pt=$(echo "$hy2_ports" | tr ',' '\n' | sed -E 's/^([0-9]+)$/\1:\1/; s/.*/"&"/' | paste -sd,)
 else
 hyps=
+cmhy2pt=
+sbhy2pt=
 fi
 hy2_hop=15
 hy2_up=50
@@ -1408,6 +1450,12 @@ clhy2obfs(){
 if [[ -n $hy2_obfs ]]; then
     echo "  obfs: salamander"
     echo "  obfs-password: $hy2_obfs"
+fi
+}
+clhy2ports(){
+if [[ -n $hy2_ports ]]; then
+    echo "  ports: $cmhy2pt"
+    echo "  hop-interval: $hy2_hop"
 fi
 }
 clhy2bw(){
@@ -1785,8 +1833,7 @@ proxies:
   type: hysteria2                                      
   server: $cl_hy2_ip                               
   port: $hy2_port
-  ports: $cmhy2pt
-  hop-interval: $hy2_hop
+$(clhy2ports)
   password: $uuid                          
 $(clhy2obfs)
 $(clhy2bw)
@@ -2912,8 +2959,8 @@ vm_port=$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds
 hy2_port=$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds[2].listen_port')
 tu5_port=$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds[3].listen_port')
 an_port=$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds[4].listen_port')
-hy2_ports=$(iptables -t nat -nL --line 2>/dev/null | grep -w "$hy2_port" | awk '{print $8}' | sed 's/dpts://; s/dpt://' | tr '\n' ',' | sed 's/,$//')
-tu5_ports=$(iptables -t nat -nL --line 2>/dev/null | grep -w "$tu5_port" | awk '{print $8}' | sed 's/dpts://; s/dpt://' | tr '\n' ',' | sed 's/,$//')
+hy2_ports=$(sbnatports "$hy2_port")
+tu5_ports=$(sbnatports "$tu5_port")
 [[ -n $hy2_ports ]] && hy2zfport="$hy2_ports" || hy2zfport="未添加"
 [[ -n $tu5_ports ]] && tu5zfport="$tu5_ports" || tu5zfport="未添加"
 }
@@ -2927,6 +2974,9 @@ if [[ $rangeport =~ ^([1-9][0-9]{3,4}:[1-9][0-9]{3,4})$ ]]; then
 b=${rangeport%%:*}
 c=${rangeport##*:}
 if [[ $b -ge 1000 && $b -le 65535 && $c -ge 1000 && $c -le 65535 && $b -lt $c ]]; then
+if natmsg=$(sbnatconflict $b $c $port); then
+red "端口范围冲突：$natmsg" && fports && return
+fi
 sbnatclr $rangeport
 iptables -t nat -A PREROUTING -p udp --dport $rangeport -j DNAT --to-destination :$port
 ip6tables -t nat -A PREROUTING -p udp --dport $rangeport -j DNAT --to-destination :$port
@@ -2942,7 +2992,10 @@ echo
 }
 fport(){
 readp "\n请输入一个转发的端口 (1000-65535范围内)：" onlyport
-if [[ $onlyport -ge 1000 && $onlyport -le 65535 ]]; then
+if [[ $onlyport =~ ^[1-9][0-9]{3,4}$ && $onlyport -ge 1000 && $onlyport -le 65535 ]]; then
+if natmsg=$(sbnatconflict $onlyport $onlyport $port); then
+red "端口冲突：$natmsg" && fport && return
+fi
 sbnatclr $onlyport
 iptables -t nat -A PREROUTING -p udp --dport $onlyport -j DNAT --to-destination :$port
 ip6tables -t nat -A PREROUTING -p udp --dport $onlyport -j DNAT --to-destination :$port
@@ -2956,7 +3009,6 @@ echo
 
 hy2deports(){
 allports
-hy2_ports=$(echo "$hy2_ports" | sed 's/,/,/g')
 IFS=',' read -ra ports <<< "$hy2_ports"
 for port in "${ports[@]}"; do
 iptables -t nat -D PREROUTING -p udp --dport $port -j DNAT --to-destination :$hy2_port
@@ -2966,7 +3018,6 @@ sbfwsave
 }
 tu5deports(){
 allports
-tu5_ports=$(echo "$tu5_ports" | sed 's/,/,/g')
 IFS=',' read -ra ports <<< "$tu5_ports"
 for port in "${ports[@]}"; do
 iptables -t nat -D PREROUTING -p udp --dport $port -j DNAT --to-destination :$tu5_port
@@ -3051,7 +3102,7 @@ changeport
 fi
 elif [ "$menu" = "3" ]; then
 if [ -n "$hy2_ports" ]; then
-hy2deports && sbshare > /dev/null 2>&1 yellow "Hysteria2多端口已删除" && changeport
+hy2deports && sbshare > /dev/null 2>&1 && yellow "Hysteria2多端口已删除" && changeport
 else
 sbshare > /dev/null 2>&1 && yellow "Hysteria2未设置多端口" && changeport
 fi
@@ -3094,7 +3145,7 @@ changeport
 fi
 elif [ "$menu" = "3" ]; then
 if [ -n "$tu5_ports" ]; then
-tu5deports && sbshare > /dev/null 2>&1 yellow "Tuic5多端口已删除" && changeport
+tu5deports && sbshare > /dev/null 2>&1 && yellow "Tuic5多端口已删除" && changeport
 else
 sbshare > /dev/null 2>&1 && yellow "Tuic5未设置多端口" && changeport
 fi
