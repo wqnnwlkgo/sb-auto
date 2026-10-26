@@ -1,7 +1,7 @@
-1.2.0
+1.2.1
 更新内容：
-1、Hysteria2 客户端配置默认带宽：上行 50 Mbps、下行 200 Mbps（使用 Brutal），可用 /etc/s-box/hy2_bw.txt（格式：上行 下行）覆盖
-2、Hysteria2 端口跳跃增加 hop_interval 15 秒（sing-box 1.11+ / Clash）
-3、Hysteria2 分享链接加入 upmbps、downmbps、hop-interval 参数，Sub-Store 可直接识别
-4、修复：WARP 私钥含 // 时配置解析失败，导致节点端口、UUID 全部为空
-5、修复：重装或改端口后旧的端口跳跃转发规则未清理，导致 Hysteria2、Tuic 连不上
+1、修复：Alpine 重启后端口跳跃转发规则丢失
+2、修复：已有 Docker 等转发规则时，跳跃端口识别错误，分享链接带上错误的 mport
+3、修复：sing-box 客户端配置漏掉单个转发端口；Clash 配置在未设置或已删除跳跃端口时仍输出 ports
+4、添加转发端口、更换 Hy2/Tuic 主端口时检查冲突，避免把一个协议的流量转给另一个协议
+5、端口输入增加 1-65535 数字校验；修复删除多端口后提示不显示
