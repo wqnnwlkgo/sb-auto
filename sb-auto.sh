@@ -3834,9 +3834,40 @@ yellow "四、如分流通道中有个别通道无网络，所填分流为黑名
 changef
 }
 
+tgwarp(){
+[[ "$sbnh" == "1.10" ]] && num=10 || num=11
+tgcidr='"91.108.56.0/22","91.108.4.0/22","91.108.8.0/22","91.108.16.0/22","91.108.12.0/22","149.154.160.0/20","91.105.192.0/23","91.108.20.0/22","185.76.151.0/24","2001:b28:f23d::/48","2001:b28:f23f::/48","2001:67c:4e8::/48","2001:b28:f23c::/48","2a0a:f280::/32"'
+if grep -q '91.108.56.0/22' /etc/s-box/sb.json 2>/dev/null; then
+sed -i '/91\.108\.56\.0\/22/d' /etc/s-box/sb10.json /etc/s-box/sb11.json
+cp /etc/s-box/sb${num}.json /etc/s-box/sb.json
+restartsb
+green "已关闭：Telegram 恢复 VPS 直连"
+else
+for tgf in 10 11; do
+tgfile="/etc/s-box/sb${tgf}.json"
+[ -f "$tgfile" ] || continue
+grep -q '91.108.56.0/22' "$tgfile" && continue
+[[ "$tgf" == "10" ]] && tgout='warp-IPv4-out' || tgout='warp-out'
+tgn=$(grep -n '"network": "udp,tcp"' "$tgfile" | tail -n1 | cut -d: -f1)
+if [ -z "$tgn" ]; then
+yellow "未找到 $tgfile 的兜底分流规则，跳过" && continue
+fi
+tgn=$((tgn-2))
+if [ "$tgn" -lt 1 ] || [ "$(sed -n "${tgn}p" "$tgfile" | tr -d '[:space:]')" != "{" ]; then
+yellow "$tgfile 兜底分流规则格式异常，跳过" && continue
+fi
+sed -i "${tgn}i {\"ip_cidr\":[${tgcidr}],\"outbound\":\"${tgout}\"}," "$tgfile"
+done
+cp /etc/s-box/sb${num}.json /etc/s-box/sb.json
+restartsb
+green "已开启：Telegram 走 WARP 出站"
+fi
+}
+
 changef(){
 [[ "$sbnh" == "1.10" ]] && num=10 || num=11
 sbymfl
+grep -q '91.108.56.0/22' /etc/s-box/sb.json 2>/dev/null && tgfl="${yellow}【已开启】${plain}" || tgfl="${yellow}【未开启】${plain}"
 echo
 [[ "$sbnh" != "1.10" ]] && wfl4='暂不支持' sfl6='暂不支持' adfl4='暂不支持' adfl6='暂不支持'
 green "1：重置warp-wireguard-ipv4优先分流域名 $wfl4"
@@ -3845,6 +3876,7 @@ green "3：重置warp-socks5-ipv4优先分流域名 $sfl4"
 green "4：重置warp-socks5-ipv6优先分流域名 $sfl6"
 green "5：重置VPS本地ipv4优先分流域名 $adfl4"
 green "6：重置VPS本地ipv6优先分流域名 $adfl6"
+green "7：Telegram 走 WARP 出站（按 IP 段分流）$tgfl"
 green "0：返回上层"
 echo
 readp "请选择：" menu
@@ -4054,6 +4086,9 @@ fi
 else
 yellow "遗憾！如需要VPS本地ipv6分流，请切换1.10系列内核" && exit
 fi
+elif [ "$menu" = "7" ]; then
+tgwarp
+changef
 else
 sb
 fi
@@ -4430,6 +4465,7 @@ done
 if [[ $ww4 = *"未"* && $ww6 = *"未"* && $ws4 = *"未"* && $ws6 = *"未"* && $l4 = *"未"* && $l6 = *"未"* ]] ; then
 echo -e "未设置域名分流"
 fi
+grep -q '91.108.56.0/22' /etc/s-box/sb.json 2>/dev/null && echo -e "Telegram 走 WARP 出站（按 IP 段分流）：${yellow}【已开启】${plain}" || echo -e "Telegram 走 WARP 出站（按 IP 段分流）：${yellow}【未开启】VPS直连${plain}"
 }
 
 inssbwpph(){
