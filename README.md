@@ -18,6 +18,14 @@ bash <(curl -Ls https://raw.githubusercontent.com/wqnnwlkgo/sb-auto/main/sb-auto
 
 > 安装完成后，直接输入 `sb` 即可再次打开管理菜单。
 
+### 手动更新 `sb` 脚本
+
+也可以不进菜单，直接用下面的命令覆盖为最新版（刚推送后 GitHub raw 可能有几分钟缓存，下到旧版就稍后再试）：
+
+```bash
+curl -L -o /usr/bin/sb https://raw.githubusercontent.com/wqnnwlkgo/sb-auto/main/sb-auto.sh && chmod +x /usr/bin/sb
+```
+
 ## 支持系统
 
 - Ubuntu / Debian / CentOS（含基于 apt/yum/dnf 的发行版）
