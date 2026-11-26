@@ -1,4 +1,4 @@
-1.4.3
+1.4.4
 更新内容：
-1、优化：新增 sb_tune_udp_buf() 自动按宿主机内存提升内核 net.core.rmem_default / wmem_default 与 rmem_max / wmem_max，解决 Hysteria2 启用 salamander 混淆时退回极小默认缓冲导致高丢包与低速问题
-2、接入：在安装启动（sbservice）与服务重启（restartsb）阶段幂等生效，持久化写入 /etc/sysctl.d/zz-sb-auto-udp.conf 并防 /etc/sysctl.conf 低值覆写；卸载（unins）时自动清理
+1、优化：将服务端 sing-box 配置模板（sb10.json / sb11.json）默认日志级别由 info 调整为 warn，大幅减少高频连接日志刷屏与 CPU/磁盘开销
+2、优化：将 Hysteria2 默认带宽由上行 50 Mbps / 下行 200 Mbps 调整为上行 30 Mbps / 下行 80 Mbps，降低普通线路下 Brutal 过度超发导致的无效重传与 CPU 占用（仍支持 /etc/s-box/hy2_bw.txt 自定义覆盖）
