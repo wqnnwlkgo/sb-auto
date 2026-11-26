@@ -1,6 +1,5 @@
-1.4.0
+1.4.1
 更新内容：
-1、新增：双栈 VPS 配置输出改为同时输出 IPv4 与 IPv6（分享链接、二维码、聚合订阅、sbox.json、clmi.yaml 及本地 IP 订阅地址全面支持双栈）
-2、修复：sbox.json 中 AnyTLS server 与 vmess:// 分享链接 add 字段误带方括号、clmi.yaml 中 Argo 节点缺少双引号导致 IPv6 解析失败的问题
-3、修复：WARP-plus-Socks5 纯 IPv6 硬编码 IPv4 Endpoint、防火墙 close()/CentOS 持久化遗漏 ip6tables、ip6tables 端口跳跃兼容性及本地订阅 httpd 仅监听 IPv4 的问题
-4、修复：warpwg() 污染全局 v6 变量、changewg() IPv6 对端显示格式、IP 探测缺少合法性校验及纯 IPv6 VPS 首次运行 NAT64 时序问题
+1、修复：AUTO=1 自动安装模式选定 Hysteria2/Tuic5 主端口时绕过 NAT 冲突检查，导致主端口被历史残留 UDP DNAT/REDIRECT 规则劫持的问题
+2、新增：sbnatprune() 自动识别并清理指向本机未监听 UDP 端口的失效（孤儿）NAT 转发规则，同时避免误伤存活服务与跨机 DNAT
+3、优化：sbnatadd() 添加规则时增加 -C 去重与 sb-auto 注释标记，增强 sbnatdel() 按标记全量清理能力，并修复 sbnatclr() 对带 comment 规则的正则兼容
