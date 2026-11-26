@@ -45,8 +45,5 @@ bash sb-auto.sh
 ## 说明
 
 - 运行时产生的配置、证书、密钥和节点信息（`/etc/s-box/` 下的 `*.json`、`cert.pem`、`private.key`、`*.txt`、`*.log` 等）均为敏感数据，已在 `.gitignore` 中排除，**不要**提交到仓库。
+- 生成的 sing-box 客户端配置（`/etc/s-box/sbox.json`）使用了 sing-box 1.14.0+ 语法（`http_clients` / `default_http_client`），建议搭配 sing-box 1.14+ 客户端（SFA / SFI / SFW）使用。
 - 本仓库只应包含脚本源码本身。
-
-## License
-
-见 [LICENSE](LICENSE)。
