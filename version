@@ -1,5 +1,6 @@
-1.4.1
+1.4.2
 更新内容：
-1、修复：AUTO=1 自动安装模式选定 Hysteria2/Tuic5 主端口时绕过 NAT 冲突检查，导致主端口被历史残留 UDP DNAT/REDIRECT 规则劫持的问题
-2、新增：sbnatprune() 自动识别并清理指向本机未监听 UDP 端口的失效（孤儿）NAT 转发规则，同时避免误伤存活服务与跨机 DNAT
-3、优化：sbnatadd() 添加规则时增加 -C 去重与 sb-auto 注释标记，增强 sbnatdel() 按标记全量清理能力，并修复 sbnatclr() 对带 comment 规则的正则兼容
+1、安全：新增 sbnat_del_rule() 消除 iptables 规则删除中的 eval 注入风险；加固 sbnatprune() 防 ss 缺失误删规则；/etc/s-box 设为 700 权限
+2、修复：修复路由规则 network 数组语法、sing-box 1.11.x 误启 AnyTLS 崩溃、端口自动选择死循环及非自动模式绕过 NAT 冲突检测、yum/dnf update 误升级全系统等问题
+3、修复：修复 VMess/AnyTLS/Hy2/Tuic5 分享链接兼容（含 BusyBox base64、Acme IPv6 证书）、Argo 隧道与本地订阅边界 Bug、UUID/国家码/Reserved 校验与菜单导航体验
+4、优化：统一 JSON 读写与版本解析逻辑，补齐 TG 推送逐条统计与 Alpine 1.10 OpenRC 目录设置，并归档历史发布说明
