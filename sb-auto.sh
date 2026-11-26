@@ -1516,7 +1516,93 @@ EOF
 sb_apply_config
 }
 
+# 优化内核 UDP 默认/最大缓冲区，避免 Hysteria2 启用 salamander 混淆时退回极小默认缓冲导致大量丢包
+sb_tune_udp_buf(){
+local mem_kb target_def target_max cur_rdef cur_wdef cur_rmax cur_wmax new_rdef new_wdef new_rmax new_wmax
+local conf="/etc/sysctl.d/zz-sb-auto-udp.conf"
+local kv k k_esc v cur_val
+# OpenVZ/LXC 等受限容器或只读 /proc/sys 环境直接跳过
+[[ $vi =~ lxc|openvz ]] && return 0
+[[ -w /proc/sys/net/core/rmem_default && -w /proc/sys/net/core/wmem_default ]] || return 0
+
+# 按宿主机内存自适应目标值，避免低内存机器占用过多缓冲
+mem_kb=$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null)
+if [[ "$mem_kb" =~ ^[0-9]+$ ]] && (( mem_kb >= 1000000 )); then
+    target_def=8388608
+    target_max=16777216
+elif [[ "$mem_kb" =~ ^[0-9]+$ ]] && (( mem_kb >= 500000 )); then
+    target_def=4194304
+    target_max=16777216
+else
+    target_def=2097152
+    target_max=8388608
+fi
+
+cur_rdef=$(cat /proc/sys/net/core/rmem_default 2>/dev/null || echo 0)
+cur_wdef=$(cat /proc/sys/net/core/wmem_default 2>/dev/null || echo 0)
+cur_rmax=$(cat /proc/sys/net/core/rmem_max 2>/dev/null || echo 0)
+cur_wmax=$(cat /proc/sys/net/core/wmem_max 2>/dev/null || echo 0)
+[[ "$cur_rdef" =~ ^[0-9]+$ ]] || cur_rdef=0
+[[ "$cur_wdef" =~ ^[0-9]+$ ]] || cur_wdef=0
+[[ "$cur_rmax" =~ ^[0-9]+$ ]] || cur_rmax=0
+[[ "$cur_wmax" =~ ^[0-9]+$ ]] || cur_wmax=0
+
+# 已达标且持久化配置存在时幂等跳过
+if (( cur_rdef >= target_def && cur_wdef >= target_def && cur_rmax >= target_max && cur_wmax >= target_max )) && [[ -f "$conf" ]]; then
+    return 0
+fi
+
+# 只升不降：保留宿主机原有更大的缓冲区上限
+new_rdef=$(( cur_rdef > target_def ? cur_rdef : target_def ))
+new_wdef=$(( cur_wdef > target_def ? cur_wdef : target_def ))
+new_rmax=$(( cur_rmax > target_max ? cur_rmax : target_max ))
+new_wmax=$(( cur_wmax > target_max ? cur_wmax : target_max ))
+(( new_rmax < new_rdef )) && new_rmax=$new_rdef
+(( new_wmax < new_wdef )) && new_wmax=$new_wdef
+
+mkdir -p /etc/sysctl.d 2>/dev/null
+cat > "$conf" <<EOF
+# 由 sb-auto 自动生成：提升 UDP 默认与最大缓冲区（避免 Hysteria2 混淆模式丢包）
+net.core.rmem_max = ${new_rmax}
+net.core.wmem_max = ${new_wmax}
+net.core.rmem_default = ${new_rdef}
+net.core.wmem_default = ${new_wdef}
+EOF
+
+# 若 /etc/sysctl.conf 显式设置了更小的对应键，同步提升以防 sysctl --system 重启覆写
+if [[ -f /etc/sysctl.conf && -w /etc/sysctl.conf ]]; then
+    for kv in "net.core.rmem_max:$new_rmax" "net.core.wmem_max:$new_wmax" "net.core.rmem_default:$new_rdef" "net.core.wmem_default:$new_wdef"; do
+        k="${kv%%:*}"
+        v="${kv##*:}"
+        cur_val=$(awk -F= -v key="$k" '
+            /^[[:space:]]*#/ || /^[[:space:]]*$/ {next}
+            {
+                sub(/[[:space:]]*#.*$/, "", $2)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
+                if ($1 == key) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); val=$2 }
+            }
+            END { print val }
+        ' /etc/sysctl.conf 2>/dev/null)
+        if [[ "$cur_val" =~ ^[0-9]+$ ]] && (( cur_val < v )); then
+            k_esc="${k//./\\.}"
+            sed -i -E "s|^[[:space:]]*${k_esc}[[:space:]]*=.*|${k} = ${v}|" /etc/sysctl.conf
+        fi
+    done
+fi
+
+if command -v sysctl >/dev/null 2>&1; then
+    sysctl -p "$conf" >/dev/null 2>&1 || true
+else
+    printf '%s\n' "$new_rmax" > /proc/sys/net/core/rmem_max 2>/dev/null || true
+    printf '%s\n' "$new_wmax" > /proc/sys/net/core/wmem_max 2>/dev/null || true
+    printf '%s\n' "$new_rdef" > /proc/sys/net/core/rmem_default 2>/dev/null || true
+    printf '%s\n' "$new_wdef" > /proc/sys/net/core/wmem_default 2>/dev/null || true
+fi
+blue "已优化内核 UDP 缓冲区：rmem_default=$((new_rdef/1048576))MB / wmem_default=$((new_wdef/1048576))MB"
+}
+
 sbservice(){
+sb_tune_udp_buf
 if command -v apk >/dev/null 2>&1; then
 echo '#!/sbin/openrc-run
 description="sing-box service"
@@ -4268,6 +4354,7 @@ fi
 }
 
 restartsb(){
+sb_tune_udp_buf
 if command -v apk >/dev/null 2>&1; then
 rc-service sing-box restart
 else
@@ -4464,7 +4551,7 @@ for _p in $(pgrep -f 'httpd.*websbox' 2>/dev/null); do
 kill -15 "$_p" >/dev/null 2>&1
 done
 rm -rf /etc/s-box sbyg_update /usr/bin/sb /root/geoip.db /root/geosite.db /root/warpapi /root/warpip /root/websbox
-rm -f /etc/local.d/alpineargo.start /etc/local.d/alpinesub.start /etc/local.d/alpinews5.start
+rm -f /etc/local.d/alpineargo.start /etc/local.d/alpinesub.start /etc/local.d/alpinews5.start /etc/sysctl.d/zz-sb-auto-udp.conf
 uncronsb
 green "Sing-box卸载完成！"
 blue "欢迎继续使用Sing-box-yg脚本：bash <(curl -Ls https://raw.githubusercontent.com/wqnnwlkgo/sb-auto/main/sb-auto.sh)"
