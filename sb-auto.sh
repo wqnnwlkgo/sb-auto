@@ -420,10 +420,16 @@ tp=$(sbjq_read /etc/s-box/sb.json '.inbounds[] | select(.type == "tuic") | .list
 echo "$hp $tp" | xargs | tr ' ' '|'
 }
 
-# 添加 UDP 端口跳跃规则：优先使用 REDIRECT，失败时回退 DNAT，同时兼容 IPv4/IPv6
+# 添加 UDP 端口跳跃规则：优先使用 REDIRECT，失败时回退 DNAT，带 sb-auto 标记并去重，同时兼容 IPv4/IPv6
 sbnatadd(){
 local dport="$1" toport="$2" t
 for t in iptables ip6tables; do
+$t -t nat -C PREROUTING -p udp --dport "$dport" -m comment --comment sb-auto -j REDIRECT --to-ports "$toport" >/dev/null 2>&1 && continue
+$t -t nat -C PREROUTING -p udp --dport "$dport" -m comment --comment sb-auto -j DNAT --to-destination ":$toport" >/dev/null 2>&1 && continue
+$t -t nat -C PREROUTING -p udp --dport "$dport" -j REDIRECT --to-ports "$toport" >/dev/null 2>&1 && continue
+$t -t nat -C PREROUTING -p udp --dport "$dport" -j DNAT --to-destination ":$toport" >/dev/null 2>&1 && continue
+$t -t nat -A PREROUTING -p udp --dport "$dport" -m comment --comment sb-auto -j REDIRECT --to-ports "$toport" 2>/dev/null || \
+$t -t nat -A PREROUTING -p udp --dport "$dport" -m comment --comment sb-auto -j DNAT --to-destination ":$toport" 2>/dev/null || \
 $t -t nat -A PREROUTING -p udp --dport "$dport" -j REDIRECT --to-ports "$toport" 2>/dev/null || \
 $t -t nat -A PREROUTING -p udp --dport "$dport" -j DNAT --to-destination ":$toport" 2>/dev/null
 done
@@ -491,22 +497,50 @@ return 1
 sbnatclr(){
 local t r
 for t in iptables ip6tables; do
-$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-p udp .*--dport $1 -j (REDIRECT|DNAT)" | while read -r r; do
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-p udp .*--dport $1( .*)? -j (REDIRECT|DNAT)" | while read -r r; do
 eval "$t -t nat -D ${r#-A }" >/dev/null 2>&1
 done
 done
 }
 
+# 清理指向本机未监听 UDP 端口的失效（孤儿）端口跳跃规则，避免劫持新端口
+sbnatprune(){
+local t r nt live_udp cur_ports cleared=0
+live_udp=$(ss -lun 2>/dev/null | awk 'NR>1{print $4}' | sed 's/.*://' | grep -E '^[0-9]+$' | sort -u)
+cur_ports=$(sbnatre 2>/dev/null)
+for t in iptables ip6tables; do
+while read -r r; do
+[[ -n $r ]] || continue
+nt=$(echo "$r" | sed -E 's/.*(--to-ports |--to-destination (\[::\])?:)([0-9]+)$/\3/')
+[[ $nt =~ ^[0-9]+$ ]] || continue
+echo "$live_udp" | grep -qx "$nt" && continue
+if [[ -n $cur_ports ]] && echo "$cur_ports" | tr '|' '\n' | grep -qx "$nt"; then
+continue
+fi
+eval "$t -t nat -D ${r#-A }" >/dev/null 2>&1 && cleared=$((cleared + 1))
+done < <($t -t nat -S PREROUTING 2>/dev/null | grep -E -- '-p udp .*--dport [0-9:]+ .*(-j REDIRECT --to-ports [0-9]+|-j DNAT --to-destination (\[::\])?:[0-9]+)$')
+done
+if [[ $cleared -gt 0 ]]; then
+yellow "已自动清理 $cleared 条失效的 UDP NAT 残留转发规则（目标端口未监听）"
+netfilter-persistent save >/dev/null 2>&1
+service iptables save >/dev/null 2>&1
+service ip6tables save >/dev/null 2>&1
+fi
+}
+
 sbnatdel(){
 local t r
 natre=$(sbnatre)
-if [[ -n $natre ]]; then
 for t in iptables ip6tables; do
+if [[ -n $natre ]]; then
 $t -t nat -S PREROUTING 2>/dev/null | grep -E -- "(-j REDIRECT --to-ports ($natre)|-j DNAT --to-destination (\[::\])?:($natre))$" | while read -r r; do
 eval "$t -t nat -D ${r#-A }" >/dev/null 2>&1
 done
-done
 fi
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- '--comment "?sb-auto"?' | while read -r r; do
+eval "$t -t nat -D ${r#-A }" >/dev/null 2>&1
+done
+done
 sbnatclr 50000:60000
 sbnatclr 40000:49999
 netfilter-persistent save >/dev/null 2>&1
@@ -2575,21 +2609,38 @@ fi
 mkdir -p /etc/s-box
 v6
 openyn
+sbnatprune
 inssb
 inscertificate
 insport
 if [[ "$AUTO" == "1" ]]; then
+_auto_try=0
 while :; do
+if [[ $_auto_try -lt 50 ]]; then
 port_hy2=$(shuf -i 50000-60000 -n 1)
+else
+port_hy2=$(shuf -i 10000-65535 -n 1)
+fi
+_auto_try=$((_auto_try + 1))
 [[ "$port_hy2" != "$port_vl_re" && "$port_hy2" != "$port_vm_ws" && "$port_hy2" != "$port_an" ]] || continue
-[[ -z $(ss -tunlp 2>/dev/null | awk '{print $5}' | sed 's/.*://g' | grep -w "$port_hy2") ]] && break
+[[ -z $(ss -tunlp 2>/dev/null | awk '{print $5}' | sed 's/.*://g' | grep -w "$port_hy2") ]] || continue
+sbnatconflict "$port_hy2" "$port_hy2" >/dev/null && continue
+break
 done
+_auto_try=0
 while :; do
+if [[ $_auto_try -lt 50 ]]; then
 port_tu=$(shuf -i 40000-49999 -n 1)
+else
+port_tu=$(shuf -i 10000-65535 -n 1)
+fi
+_auto_try=$((_auto_try + 1))
 [[ "$port_tu" != "$port_vl_re" && "$port_tu" != "$port_vm_ws" && "$port_tu" != "$port_an" && "$port_tu" != "$port_hy2" ]] || continue
-[[ -z $(ss -tunlp 2>/dev/null | awk '{print $5}' | sed 's/.*://g' | grep -w "$port_tu") ]] && break
+[[ -z $(ss -tunlp 2>/dev/null | awk '{print $5}' | sed 's/.*://g' | grep -w "$port_tu") ]] || continue
+sbnatconflict "$port_tu" "$port_tu" >/dev/null && continue
+break
 done
-blue "自动模式已将Hy2主端口固定在跳跃段内：$port_hy2，Tuic主端口固定在跳跃段内：$port_tu"
+blue "自动模式已为Hy2选定主端口：$port_hy2，Tuic选定主端口：$port_tu"
 fi
 sleep 2
 echo
