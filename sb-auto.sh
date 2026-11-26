@@ -52,6 +52,40 @@ crontab -l 2>/dev/null > "$tmp" || true
 crontab "$tmp" >/dev/null 2>&1
 rm -f "$tmp"
 }
+# 校验是否为合法的 IPv4 地址（4 段 0-255 数字，无多余字符）
+is_valid_ipv4(){
+local ip="$1" o1 o2 o3 o4
+[[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+o1="${BASH_REMATCH[1]}" o2="${BASH_REMATCH[2]}" o3="${BASH_REMATCH[3]}" o4="${BASH_REMATCH[4]}"
+(( 10#$o1 <= 255 && 10#$o2 <= 255 && 10#$o3 <= 255 && 10#$o4 <= 255 ))
+}
+# 校验是否为合法的 IPv6 地址（含冒号且仅包含十六进制字符与冒号）
+is_valid_ipv6(){
+local ip="$1"
+[[ "$ip" == *:* && "$ip" =~ ^[0-9a-fA-F:]+$ ]]
+}
+# 格式化 host:port，IPv6 自动补充方括号
+fmt_host_port(){
+local h="$1" p="$2"
+if [[ "$h" == *:* && "$h" != \[*\] ]]; then
+echo "[$h]:$p"
+else
+echo "$h:$p"
+fi
+}
+# 纯 IPv6 环境提前配置 NAT64，避免首次安装依赖或拉取 GitHub 失败
+ensure_nat64(){
+if ! ip -4 route show default 2>/dev/null | grep -q . && ip -6 route show default 2>/dev/null | grep -q .; then
+if ! grep -q '2a00:1098:2b::1' /etc/resolv.conf 2>/dev/null; then
+local test_v6
+test_v6=$(curl -s6 --connect-timeout 2 -m 3 https://icanhazip.com 2>/dev/null | tr -d '[:space:]')
+if is_valid_ipv6 "$test_v6"; then
+[[ -f /etc/resolv.conf && ! -f /etc/resolv.conf.sb.bak ]] && cp -a /etc/resolv.conf /etc/resolv.conf.sb.bak 2>/dev/null || true
+printf 'nameserver 2a00:1098:2b::1\nnameserver 2a00:1098:2c::1\n' > /etc/resolv.conf
+fi
+fi
+fi
+}
 #[[ -e /etc/hosts ]] && grep -qE '^ *172.65.251.78 gitlab.com' /etc/hosts || echo -e '\n172.65.251.78 gitlab.com' >> /etc/hosts
 if [[ -f /etc/redhat-release ]]; then
 release="Centos"
@@ -101,6 +135,8 @@ mkdir -p /etc/s-box
 if [[ -f sbyg_update && ! -f /etc/s-box/.sbyg_update ]]; then
 mv -f sbyg_update /etc/s-box/.sbyg_update 2>/dev/null || touch /etc/s-box/.sbyg_update
 fi
+# 首次运行若为纯 IPv6 环境，提前配置 NAT64 以保障依赖安装与 GitHub 访问
+ensure_nat64
 if [ ! -f /etc/s-box/.sbyg_update ]; then
 green "首次安装Sing-box-yg脚本必要的依赖……"
 if command -v apk >/dev/null 2>&1; then
@@ -151,6 +187,8 @@ ip6tables-save > /etc/sysconfig/ip6tables 2>/dev/null
 fi
 systemctl enable iptables >/dev/null 2>&1
 systemctl start iptables >/dev/null 2>&1
+systemctl enable ip6tables >/dev/null 2>&1
+systemctl start ip6tables >/dev/null 2>&1
 fi
 fi
 if [[ -z $vi && -x "$(command -v apt-get)" ]]; then
@@ -205,6 +243,9 @@ tmpdir=$(mktemp -d)
 wait
 v4=$(tr -d '[:space:]' < "$tmpdir/v4")
 v6=$(tr -d '[:space:]' < "$tmpdir/v6")
+# 清洗探测结果，避免错误页等非法内容污染 IP 变量
+is_valid_ipv4 "$v4" || v4=""
+is_valid_ipv6 "$v6" || v6=""
 v4dq=""
 v6dq=""
 # 仅对存在的协议栈查询归属地，单栈 VPS 不再白等另一协议超时
@@ -236,6 +277,11 @@ v4orv6(){
 local has_v4 has_v6
 has_v4=$(curl -s4 --connect-timeout 2 -m 4 https://icanhazip.com 2>/dev/null || curl -s4 --connect-timeout 2 -m 4 https://api.ipify.org 2>/dev/null)
 has_v6=$(curl -s6 --connect-timeout 2 -m 4 https://icanhazip.com 2>/dev/null || curl -s6 --connect-timeout 2 -m 4 https://api6.ipify.org 2>/dev/null)
+has_v4=$(printf '%s' "$has_v4" | tr -d '[:space:]')
+has_v6=$(printf '%s' "$has_v6" | tr -d '[:space:]')
+# 清洗探测结果，避免非 IP 文本干扰单双栈判定
+is_valid_ipv4 "$has_v4" || has_v4=""
+is_valid_ipv6 "$has_v6" || has_v6=""
 # 仅在确实无默认 IPv4 路由且双探测源均无 IPv4 时才判定为纯 IPv6 并配置 NAT64
 if [[ -z "$has_v4" && -n "$has_v6" ]] && ! ip -4 route show default 2>/dev/null | grep -q .; then
 echo
@@ -280,6 +326,12 @@ iptables -P OUTPUT ACCEPT >/dev/null 2>&1
 iptables -t mangle -F >/dev/null 2>&1
 iptables -F >/dev/null 2>&1
 iptables -X >/dev/null 2>&1
+ip6tables -P INPUT ACCEPT >/dev/null 2>&1
+ip6tables -P FORWARD ACCEPT >/dev/null 2>&1
+ip6tables -P OUTPUT ACCEPT >/dev/null 2>&1
+ip6tables -t mangle -F >/dev/null 2>&1
+ip6tables -F >/dev/null 2>&1
+ip6tables -X >/dev/null 2>&1
 netfilter-persistent save >/dev/null 2>&1
 sleep 1
 green "执行开放端口，关闭防火墙完毕"
@@ -368,16 +420,26 @@ tp=$(sbjq_read /etc/s-box/sb.json '.inbounds[] | select(.type == "tuic") | .list
 echo "$hp $tp" | xargs | tr ' ' '|'
 }
 
+# 添加 UDP 端口跳跃规则：优先使用 REDIRECT，失败时回退 DNAT，同时兼容 IPv4/IPv6
+sbnatadd(){
+local dport="$1" toport="$2" t
+for t in iptables ip6tables; do
+$t -t nat -A PREROUTING -p udp --dport "$dport" -j REDIRECT --to-ports "$toport" 2>/dev/null || \
+$t -t nat -A PREROUTING -p udp --dport "$dport" -j DNAT --to-destination ":$toport" 2>/dev/null
+done
+}
+
 sbfwsave(){
 netfilter-persistent save >/dev/null 2>&1
 service iptables save >/dev/null 2>&1
+service ip6tables save >/dev/null 2>&1
 [[ -d /etc/s-box ]] || return 0
 natre=$(sbnatre)
 {
 echo '#!/bin/bash'
 for t in iptables ip6tables; do
 if [[ -n $natre ]]; then
-$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-j DNAT --to-destination :($natre)$" | while read -r r; do
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "(-j REDIRECT --to-ports ($natre)|-j DNAT --to-destination (\[::\])?:($natre))$" | while read -r r; do
 r=${r#-A }
 echo "$t -t nat -C $r >/dev/null 2>&1 || $t -t nat -A $r >/dev/null 2>&1"
 done
@@ -400,7 +462,7 @@ sbnatports(){
 {
 iptables -t nat -S PREROUTING 2>/dev/null
 ip6tables -t nat -S PREROUTING 2>/dev/null
-} | grep -E -- "-p udp .*-j DNAT --to-destination :$1$" | grep -oE -- '--dport [0-9:]+' | awk '{print $2}' | awk '!seen[$0]++' | paste -sd,
+} | grep -E -- "-p udp .*(-j REDIRECT --to-ports $1|-j DNAT --to-destination (\[::\])?:$1)$" | grep -oE -- '--dport [0-9:]+' | awk '{print $2}' | awk '!seen[$0]++' | paste -sd,
 }
 
 sbnatconflict(){
@@ -422,14 +484,14 @@ fi
 done < <({
 iptables -t nat -S PREROUTING 2>/dev/null
 ip6tables -t nat -S PREROUTING 2>/dev/null
-} | grep -E -- '-p udp .*--dport [0-9:]+ .*-j DNAT --to-destination :[0-9]+$' | sed -E 's/.*--dport ([0-9:]+) .*--to-destination :([0-9]+)$/\1 \2/' | sort -u)
+} | grep -E -- '-p udp .*--dport [0-9:]+ .*(-j REDIRECT --to-ports [0-9]+|-j DNAT --to-destination (\[::\])?:[0-9]+)$' | sed -E 's/.*--dport ([0-9:]+) .*(--to-ports |--to-destination (\[::\])?:)([0-9]+)$/\1 \4/' | sort -u)
 return 1
 }
 
 sbnatclr(){
 local t r
 for t in iptables ip6tables; do
-$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-p udp .*--dport $1 -j DNAT" | while read -r r; do
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-p udp .*--dport $1 -j (REDIRECT|DNAT)" | while read -r r; do
 eval "$t -t nat -D ${r#-A }" >/dev/null 2>&1
 done
 done
@@ -440,7 +502,7 @@ local t r
 natre=$(sbnatre)
 if [[ -n $natre ]]; then
 for t in iptables ip6tables; do
-$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-j DNAT --to-destination :($natre)$" | while read -r r; do
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "(-j REDIRECT --to-ports ($natre)|-j DNAT --to-destination (\[::\])?:($natre))$" | while read -r r; do
 eval "$t -t nat -D ${r#-A }" >/dev/null 2>&1
 done
 done
@@ -449,6 +511,7 @@ sbnatclr 50000:60000
 sbnatclr 40000:49999
 netfilter-persistent save >/dev/null 2>&1
 service iptables save >/dev/null 2>&1
+service ip6tables save >/dev/null 2>&1
 }
 
 openyn(){
@@ -883,7 +946,7 @@ cat > /etc/s-box/sb10.json <<EOF
 "server_port":2408,
 "local_address":[
 "172.16.0.2/32",
-"${v6}/128"
+"${warp_v6}/128"
 ],
 "private_key":"$pvk",
 "peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
@@ -1096,7 +1159,7 @@ cat > /etc/s-box/sb11.json <<EOF
 "tag":"warp-out",
 "address":[
 "172.16.0.2/32",
-"${v6}/128"
+"${warp_v6}/128"
 ],
 "private_key":"$pvk",
 "peers": [
@@ -1223,36 +1286,38 @@ status_pattern="active"
 fi
 if [[ -n $($status_cmd 2>/dev/null | grep -w "$status_pattern") && -f '/etc/s-box/sb.json' ]]; then
 v4v6 force
-if [[ -n $v4 && -n $v6 ]]; then
-green "调整IPv4/IPV6配置输出"
-yellow "1：刷新本地IP，使用IPV4配置输出 (回车默认) "
-yellow "2：刷新本地IP，使用IPV6配置输出"
-readp "请选择【1-2】：" menu
-if [ -z "$menu" ] || [ "$menu" = "1" ]; then
+# 若 IPv4 与 IPv6 均未获取到有效地址，保留旧文件不覆盖
+if [[ -z "$v4" && -z "$v6" ]]; then
+red "获取本地 IPv4/IPv6 地址失败，已保留原有配置不覆盖"
+return 1
+fi
+# 分别记录纯 IPv4 与纯 IPv6 地址（不存在则清空）
+if [[ -n "$v4" ]]; then
+echo "$v4" > /etc/s-box/server_ipv4.log
+else
+: > /etc/s-box/server_ipv4.log
+fi
+if [[ -n "$v6" ]]; then
+echo "$v6" > /etc/s-box/server_ipv6.log
+else
+: > /etc/s-box/server_ipv6.log
+fi
+# 同时维护向后兼容的 server_ip.log 与 server_ipcl.log（优先 IPv4，纯 IPv6 时带/不带方括号）
+if [[ -n "$v4" ]]; then
 server_ip="$v4"
-echo "$server_ip" > /etc/s-box/server_ip.log
 server_ipcl="$v4"
-echo "$server_ipcl" > /etc/s-box/server_ipcl.log
 else
 server_ip="[$v6]"
-echo "$server_ip" > /etc/s-box/server_ip.log
 server_ipcl="$v6"
-echo "$server_ipcl" > /etc/s-box/server_ipcl.log
 fi
-else
-yellow "VPS并不是双栈VPS，不支持IP配置输出的切换"
-serip=$(curl -s4m5 icanhazip.com -k || curl -s6m5 icanhazip.com -k)
-if [[ "$serip" =~ : ]]; then
-server_ip="[$serip]"
 echo "$server_ip" > /etc/s-box/server_ip.log
-server_ipcl="$serip"
 echo "$server_ipcl" > /etc/s-box/server_ipcl.log
+if [[ -n "$v4" && -n "$v6" ]]; then
+green "已刷新双栈本地 IP：IPv4=${v4}，IPv6=${v6}（将同时输出 IPv4 和 IPv6 配置）"
+elif [[ -n "$v4" ]]; then
+green "已刷新本地 IPv4：${v4}"
 else
-server_ip="$serip"
-echo "$server_ip" > /etc/s-box/server_ip.log
-server_ipcl="$serip"
-echo "$server_ipcl" > /etc/s-box/server_ipcl.log
-fi
+green "已刷新本地 IPv6：${v6}"
 fi
 else
 red "Sing-box服务未运行" && exit
@@ -1281,8 +1346,39 @@ ym=$(bash ~/.acme.sh/acme.sh --list 2>/dev/null | awk 'NR>1 && $1!="" {d=$1} END
 [[ -n "$ym" ]] && echo "$ym" > /root/ygkkkca/ca.log
 fi
 rm -rf /etc/s-box/vm_ws_argo.txt /etc/s-box/vm_ws.txt /etc/s-box/vm_ws_tls.txt
+# 读取并校验双栈本地 IP，兼容老环境从 server_ipcl.log 回退
+server_ipv4=$(tr -d '[:space:]' < /etc/s-box/server_ipv4.log 2>/dev/null)
+server_ipv6=$(tr -d '[:space:]' < /etc/s-box/server_ipv6.log 2>/dev/null)
+is_valid_ipv4 "$server_ipv4" || server_ipv4=""
+is_valid_ipv6 "$server_ipv6" || server_ipv6=""
+if [[ ! -f /etc/s-box/server_ipv4.log && ! -f /etc/s-box/server_ipv6.log ]]; then
+local _old_ip
+_old_ip=$(tr -d '[:space:]' < /etc/s-box/server_ipcl.log 2>/dev/null)
+if is_valid_ipv4 "$_old_ip"; then
+server_ipv4="$_old_ip"
+elif is_valid_ipv6 "$_old_ip"; then
+server_ipv6="$_old_ip"
+fi
+fi
+# 构建直连 IP 列表与标签后缀（双栈区分 -v4/-v6，单栈后缀为空）
+server_ips_list=()
+server_ip_tags=()
+if [[ -n "$server_ipv4" && -n "$server_ipv6" ]]; then
+server_ips_list=("$server_ipv4" "$server_ipv6")
+server_ip_tags=("-v4" "-v6")
+elif [[ -n "$server_ipv4" ]]; then
+server_ips_list=("$server_ipv4")
+server_ip_tags=("")
+elif [[ -n "$server_ipv6" ]]; then
+server_ips_list=("$server_ipv6")
+server_ip_tags=("")
+fi
 server_ip=$(cat /etc/s-box/server_ip.log 2>/dev/null)
 server_ipcl=$(cat /etc/s-box/server_ipcl.log 2>/dev/null)
+if [[ -z "$server_ipcl" && ${#server_ips_list[@]} -gt 0 ]]; then
+server_ipcl="${server_ips_list[0]}"
+[[ "$server_ipcl" == *:* ]] && server_ip="[$server_ipcl]" || server_ip="$server_ipcl"
+fi
 uuid=$(sbjq_read /etc/s-box/sb.json '.inbounds[0].users[0].uuid')
 vl_port=$(sbjq_read /etc/s-box/sb.json '.inbounds[0].listen_port')
 vl_name=$(sbjq_read /etc/s-box/sb.json '.inbounds[0].tls.server_name')
@@ -1294,22 +1390,26 @@ ws_path=$(sbjq_read /etc/s-box/sb.json '.inbounds[1].transport.path')
 vm_port=$(sbjq_read /etc/s-box/sb.json '.inbounds[1].listen_port')
 tls=$(sbjq_read /etc/s-box/sb.json '.inbounds[1].tls.enabled')
 vm_name=$(sbjq_read /etc/s-box/sb.json '.inbounds[1].tls.server_name')
+vm_is_direct_ip=0
 if [[ "$tls" = "false" ]]; then
 if [[ -s /etc/s-box/cfymjx.txt ]]; then
 vm_name=$(cat /etc/s-box/cfymjx.txt 2>/dev/null)
 fi
 vmadd_local=$server_ipcl
-vmadd_are_local=$server_ip
+vmadd_are_local=$server_ipcl
+vm_is_direct_ip=1
 else
 vmadd_local=$vm_name
 vmadd_are_local=$vm_name
 fi
 if [[ -s /etc/s-box/cfvmadd_local.txt ]]; then
-vmadd_local=$(cat /etc/s-box/cfvmadd_local.txt 2>/dev/null)
-vmadd_are_local=$(cat /etc/s-box/cfvmadd_local.txt 2>/dev/null)
+# 若用户输入的优选 IPv6 带方括号，自动去除方括号以保证 JSON/YAML 合法
+vmadd_local=$(tr -d '[:space:]' < /etc/s-box/cfvmadd_local.txt 2>/dev/null | sed 's/^\[//;s/\]$//')
+vmadd_are_local="$vmadd_local"
+vm_is_direct_ip=0
 fi
 if [[ -s /etc/s-box/cfvmadd_argo.txt ]]; then
-vmadd_argo=$(cat /etc/s-box/cfvmadd_argo.txt 2>/dev/null)
+vmadd_argo=$(tr -d '[:space:]' < /etc/s-box/cfvmadd_argo.txt 2>/dev/null | sed 's/^\[//;s/\]$//')
 else
 vmadd_argo=cloudflare-ech.com
 fi
@@ -1350,12 +1450,14 @@ sb_hy2_ip=$server_ip
 cl_hy2_ip=$server_ipcl
 ins_hy2=1
 hy2_ins=true
+hy2_is_direct_ip=1
 else
 hy2_name=$ym
 sb_hy2_ip=$ym
 cl_hy2_ip=$ym
 ins_hy2=0
 hy2_ins=false
+hy2_is_direct_ip=0
 fi
 tu5_port=$(sbjq_read /etc/s-box/sb.json '.inbounds[3].listen_port')
 tu5_sniname=$(sbjq_read /etc/s-box/sb.json '.inbounds[3].tls.key_path')
@@ -1365,12 +1467,14 @@ sb_tu5_ip=$server_ip
 cl_tu5_ip=$server_ipcl
 ins=1
 tu5_ins=true
+tu5_is_direct_ip=1
 else
 tu5_name=$ym
 sb_tu5_ip=$ym
 cl_tu5_ip=$ym
 ins=0
 tu5_ins=false
+tu5_is_direct_ip=0
 fi
 an_port=$(sbjq_read /etc/s-box/sb.json '.inbounds[4].listen_port // empty')
 an_sniname=$(sbjq_read /etc/s-box/sb.json '.inbounds[4].tls.key_path // empty')
@@ -1380,44 +1484,55 @@ sb_an_ip=$server_ip
 cl_an_ip=$server_ipcl
 ins_an=1
 an_ins=true
+an_is_direct_ip=1
 else
 an_name=$ym
 sb_an_ip=$ym
 cl_an_ip=$ym
 ins_an=0
 an_ins=false
+an_is_direct_ip=0
 fi
 }
 
 resvless(){
+local i ip tag host_uri vl_link
+: > /etc/s-box/vl_reality.txt
 echo
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-vl_link="vless://$uuid@$server_ip:$vl_port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$vl_name&fp=chrome&pbk=$public_key&sid=$short_id&type=tcp&headerType=none#vl-reality-$hostname"
-echo "$vl_link" > /etc/s-box/vl_reality.txt
 red "🚀【 vless-reality-vision 】节点信息如下：" && sleep 2
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+host_uri=$(fmt_host_port "$ip" "$vl_port")
+vl_link="vless://$uuid@$host_uri?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$vl_name&fp=chrome&pbk=$public_key&sid=$short_id&type=tcp&headerType=none#vl-reality-$hostname$tag"
+echo "$vl_link" >> /etc/s-box/vl_reality.txt
 echo
-echo "分享链接【v2ran(切换singbox内核)、nekobox、小火箭shadowrocket】"
+echo "分享链接${tag}【v2ran(切换singbox内核)、nekobox、小火箭shadowrocket】"
 echo -e "${yellow}$vl_link${plain}"
 echo
-echo "二维码【v2ran(切换singbox内核)、nekobox、小火箭shadowrocket】"
-qrencode -o - -t ANSIUTF8 "$(cat /etc/s-box/vl_reality.txt)"
+echo "二维码${tag}【v2ran(切换singbox内核)、nekobox、小火箭shadowrocket】"
+qrencode -o - -t ANSIUTF8 "$vl_link"
+done
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 echo
 }
 
 resvmess(){
+local i ip tag vm_link
 if [[ "$tls" = "false" ]]; then
-if ps -ef 2>/dev/null | grep "[l]ocalhost:$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds[1].listen_port')" >/dev/null 2>&1; then
+if ps -ef 2>/dev/null | grep "[l]ocalhost:${vm_port}" >/dev/null 2>&1; then
 echo
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 red "🚀【 vmess-ws(tls)+Argo 】临时节点信息如下(可选择3-8-3，自定义CDN优选地址)：" && sleep 2
 echo
 echo "分享链接【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
-echo -e "${yellow}vmess://$(echo '{"add":"'$vmadd_argo'","aid":"0","host":"'$argo'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"443","ps":"'vm-argo-$hostname'","tls":"tls","sni":"'$argo'","fp":"chrome","type":"none","v":"2"}' | base64 -w 0)${plain}"
+vm_link="vmess://$(echo '{"add":"'$vmadd_argo'","aid":"0","host":"'$argo'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"443","ps":"'vm-argo-$hostname'","tls":"tls","sni":"'$argo'","fp":"chrome","type":"none","v":"2"}' | base64 -w 0)"
+echo -e "${yellow}$vm_link${plain}"
 echo
 echo "二维码【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
-echo 'vmess://'$(echo '{"add":"'$vmadd_argo'","aid":"0","host":"'$argo'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"443","ps":"'vm-argo-$hostname'","tls":"tls","sni":"'$argo'","fp":"chrome","type":"none","v":"2"}' | base64 -w 0) > /etc/s-box/vm_ws_argols.txt
-qrencode -o - -t ANSIUTF8 "$(cat /etc/s-box/vm_ws_argols.txt)"
+echo "$vm_link" > /etc/s-box/vm_ws_argols.txt
+qrencode -o - -t ANSIUTF8 "$vm_link"
 fi
 if ps -ef 2>/dev/null | grep -q '[c]loudflared.*run'; then
 argogd=$(cat /etc/s-box/sbargoym.log 2>/dev/null)
@@ -1426,86 +1541,160 @@ white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 red "🚀【 vmess-ws(tls)+Argo 】固定节点信息如下 (可选择3-8-3，自定义CDN优选地址)：" && sleep 2
 echo
 echo "分享链接【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
-echo -e "${yellow}vmess://$(echo '{"add":"'$vmadd_argo'","aid":"0","host":"'$argogd'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"443","ps":"'vm-argo-$hostname'","tls":"tls","sni":"'$argogd'","fp":"chrome","type":"none","v":"2"}' | base64 -w 0)${plain}"
+vm_link="vmess://$(echo '{"add":"'$vmadd_argo'","aid":"0","host":"'$argogd'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"443","ps":"'vm-argo-$hostname'","tls":"tls","sni":"'$argogd'","fp":"chrome","type":"none","v":"2"}' | base64 -w 0)"
+echo -e "${yellow}$vm_link${plain}"
 echo
 echo "二维码【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
-echo 'vmess://'$(echo '{"add":"'$vmadd_argo'","aid":"0","host":"'$argogd'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"443","ps":"'vm-argo-$hostname'","tls":"tls","sni":"'$argogd'","fp":"chrome","type":"none","v":"2"}' | base64 -w 0) > /etc/s-box/vm_ws_argogd.txt
-qrencode -o - -t ANSIUTF8 "$(cat /etc/s-box/vm_ws_argogd.txt)"
+echo "$vm_link" > /etc/s-box/vm_ws_argogd.txt
+qrencode -o - -t ANSIUTF8 "$vm_link"
 fi
 echo
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 red "🚀【 vmess-ws 】节点信息如下 (建议选择3-8-1，设置为CDN优选节点)：" && sleep 2
+: > /etc/s-box/vm_ws.txt
+if [[ "$vm_is_direct_ip" = "1" ]]; then
+# 直连 VPS IP 时同时输出双栈节点，JSON 中 add 字段严格使用不带方括号的纯 IP
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+vm_link="vmess://$(echo '{"add":"'$ip'","aid":"0","host":"'$vm_name'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"'$vm_port'","ps":"'vm-ws-$hostname$tag'","tls":"","type":"none","v":"2"}' | base64 -w 0)"
+echo "$vm_link" >> /etc/s-box/vm_ws.txt
+echo
+echo "分享链接${tag}【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
+echo -e "${yellow}$vm_link${plain}"
+echo
+echo "二维码${tag}【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
+qrencode -o - -t ANSIUTF8 "$vm_link"
+done
+else
+vm_link="vmess://$(echo '{"add":"'$vmadd_are_local'","aid":"0","host":"'$vm_name'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"'$vm_port'","ps":"'vm-ws-$hostname'","tls":"","type":"none","v":"2"}' | base64 -w 0)"
+echo "$vm_link" > /etc/s-box/vm_ws.txt
 echo
 echo "分享链接【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
-echo -e "${yellow}vmess://$(echo '{"add":"'$vmadd_are_local'","aid":"0","host":"'$vm_name'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"'$vm_port'","ps":"'vm-ws-$hostname'","tls":"","type":"none","v":"2"}' | base64 -w 0)${plain}"
+echo -e "${yellow}$vm_link${plain}"
 echo
 echo "二维码【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
-echo 'vmess://'$(echo '{"add":"'$vmadd_are_local'","aid":"0","host":"'$vm_name'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"'$vm_port'","ps":"'vm-ws-$hostname'","tls":"","type":"none","v":"2"}' | base64 -w 0) > /etc/s-box/vm_ws.txt
-qrencode -o - -t ANSIUTF8 "$(cat /etc/s-box/vm_ws.txt)"
+qrencode -o - -t ANSIUTF8 "$vm_link"
+fi
 else
 echo
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 red "🚀【 vmess-ws-tls 】节点信息如下 (建议选择3-8-1，设置为CDN优选节点)：" && sleep 2
+vm_link="vmess://$(echo '{"add":"'$vmadd_are_local'","aid":"0","host":"'$vm_name'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"'$vm_port'","ps":"'vm-ws-tls-$hostname'","tls":"tls","sni":"'$vm_name'","fp":"chrome","type":"none","v":"2"}' | base64 -w 0)"
+echo "$vm_link" > /etc/s-box/vm_ws_tls.txt
 echo
 echo "分享链接【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
-echo -e "${yellow}vmess://$(echo '{"add":"'$vmadd_are_local'","aid":"0","host":"'$vm_name'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"'$vm_port'","ps":"'vm-ws-tls-$hostname'","tls":"tls","sni":"'$vm_name'","fp":"chrome","type":"none","v":"2"}' | base64 -w 0)${plain}"
+echo -e "${yellow}$vm_link${plain}"
 echo
 echo "二维码【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
-echo 'vmess://'$(echo '{"add":"'$vmadd_are_local'","aid":"0","host":"'$vm_name'","id":"'$uuid'","net":"ws","path":"'$ws_path'","port":"'$vm_port'","ps":"'vm-ws-tls-$hostname'","tls":"tls","sni":"'$vm_name'","fp":"chrome","type":"none","v":"2"}' | base64 -w 0) > /etc/s-box/vm_ws_tls.txt
-qrencode -o - -t ANSIUTF8 "$(cat /etc/s-box/vm_ws_tls.txt)"
+qrencode -o - -t ANSIUTF8 "$vm_link"
 fi
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 echo
 }
 
 reshy2(){
+local i ip tag host_uri hy2_link
+: > /etc/s-box/hy2.txt
 echo
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 hyext=
 [[ -n $hyps ]] && hyext="&hop-interval=$hy2_hop"
 [[ -n $hy2_up && -n $hy2_down ]] && hyext="$hyext&upmbps=$hy2_up&downmbps=$hy2_down"
-# 仅自签证书附带 pinSHA256，Acme 域名证书不输出 pinSHA256 避免握手校验失败
+red "🚀【 Hysteria-2 】节点信息如下：" && sleep 2
+# 仅自签证书附带 pinSHA256，且自签直连 VPS IP 时同时输出双栈节点
+if [[ "$hy2_is_direct_ip" = "1" ]]; then
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+host_uri=$(fmt_host_port "$ip" "$hy2_port")
+hy2_link="hysteria2://$uuid@$host_uri?security=tls&alpn=h3&insecure=0&allowInsecure=0$hyps$hyext$hyobfs&sni=$hy2_name$hypin#hy2-$hostname$tag"
+echo "$hy2_link" >> /etc/s-box/hy2.txt
+echo
+echo "分享链接${tag}【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
+echo -e "${yellow}$hy2_link${plain}"
+echo
+echo "二维码${tag}【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
+qrencode -o - -t ANSIUTF8 "$hy2_link"
+done
+else
 hy2_link="hysteria2://$uuid@$sb_hy2_ip:$hy2_port?security=tls&alpn=h3&insecure=0&allowInsecure=0$hyps$hyext$hyobfs&sni=$hy2_name$hypin#hy2-$hostname"
 echo "$hy2_link" > /etc/s-box/hy2.txt
-red "🚀【 Hysteria-2 】节点信息如下：" && sleep 2
 echo
 echo "分享链接【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
 echo -e "${yellow}$hy2_link${plain}"
 echo
 echo "二维码【v2rayn、v2rayng、nekobox、小火箭shadowrocket】"
-qrencode -o - -t ANSIUTF8 "$(cat /etc/s-box/hy2.txt)"
+qrencode -o - -t ANSIUTF8 "$hy2_link"
+fi
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 echo
 }
 
 restu5(){
+local i ip tag host_uri tuic5_link
+: > /etc/s-box/tuic5.txt
 echo
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+red "🚀【 Tuic-v5 】节点信息如下：" && sleep 2
+if [[ "$tu5_is_direct_ip" = "1" ]]; then
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+host_uri=$(fmt_host_port "$ip" "$tu5_port")
+tuic5_link="tuic://$uuid:$uuid@$host_uri?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=$tu5_name&insecure=$ins&allowInsecure=$ins&allow_insecure=$ins#tu5-$hostname$tag"
+echo "$tuic5_link" >> /etc/s-box/tuic5.txt
+echo
+echo "分享链接${tag}【v2rayn、nekobox、小火箭shadowrocket】"
+echo -e "${yellow}$tuic5_link${plain}"
+echo
+echo "二维码${tag}【v2rayn、nekobox、小火箭shadowrocket】"
+qrencode -o - -t ANSIUTF8 "$tuic5_link"
+done
+else
 tuic5_link="tuic://$uuid:$uuid@$sb_tu5_ip:$tu5_port?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=$tu5_name&insecure=$ins&allowInsecure=$ins&allow_insecure=$ins#tu5-$hostname"
 echo "$tuic5_link" > /etc/s-box/tuic5.txt
-red "🚀【 Tuic-v5 】节点信息如下：" && sleep 2
 echo
 echo "分享链接【v2rayn、nekobox、小火箭shadowrocket】"
 echo -e "${yellow}$tuic5_link${plain}"
 echo
 echo "二维码【v2rayn、nekobox、小火箭shadowrocket】"
-qrencode -o - -t ANSIUTF8 "$(cat /etc/s-box/tuic5.txt)"
+qrencode -o - -t ANSIUTF8 "$tuic5_link"
+fi
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 echo
 }
 
 resan(){
+local i ip tag host_uri an_link
+: > /etc/s-box/an.txt
 echo
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+red "🚀【 Anytls】节点信息如下：" && sleep 2
+if [[ "$an_is_direct_ip" = "1" ]]; then
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+host_uri=$(fmt_host_port "$ip" "$an_port")
+an_link="anytls://$uuid@$host_uri?&sni=$an_name&allowInsecure=$ins_an&insecure=$ins_an#anytls-$hostname$tag"
+echo "$an_link" >> /etc/s-box/an.txt
+echo
+echo "分享链接${tag}【v2rayn、小火箭shadowrocket】"
+echo -e "${yellow}$an_link${plain}"
+echo
+echo "二维码${tag}【v2rayn、nekobox、小火箭shadowrocket】"
+qrencode -o - -t ANSIUTF8 "$an_link"
+done
+else
 an_link="anytls://$uuid@$sb_an_ip:$an_port?&sni=$an_name&allowInsecure=$ins_an&insecure=$ins_an#anytls-$hostname"
 echo "$an_link" > /etc/s-box/an.txt
-red "🚀【 Anytls】节点信息如下：" && sleep 2
 echo
 echo "分享链接【v2rayn、小火箭shadowrocket】"
 echo -e "${yellow}$an_link${plain}"
 echo
 echo "二维码【v2rayn、nekobox、小火箭shadowrocket】"
-qrencode -o - -t ANSIUTF8 "$(cat /etc/s-box/an.txt)"
+qrencode -o - -t ANSIUTF8 "$an_link"
+fi
 white "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 echo
 }
@@ -1555,10 +1744,10 @@ fi
 sbhy2obfs(){
 if [[ -n $hy2_obfs ]]; then
     cat <<EOF
-  "obfs": {
-    "type": "salamander",
-    "password": "$hy2_obfs"
-  },
+        "obfs": {
+            "type": "salamander",
+            "password": "$hy2_obfs"
+        },
 EOF
 fi
 }
@@ -1566,8 +1755,8 @@ fi
 sbhy2bw(){
 if [[ -n $hy2_up && -n $hy2_down ]]; then
     cat <<EOF
-  "up_mbps": $hy2_up,
-  "down_mbps": $hy2_down,
+        "up_mbps": $hy2_up,
+        "down_mbps": $hy2_down,
 EOF
 fi
 }
@@ -1575,15 +1764,17 @@ fi
 clhy2obfs(){
 if [[ -n $hy2_obfs ]]; then
     echo "  obfs: salamander"
-    echo "  obfs-password: $hy2_obfs"
+    echo "  obfs-password: \"$hy2_obfs\""
 fi
 }
+
 clhy2ports(){
 if [[ -n $hy2_ports ]]; then
     echo "  ports: $cmhy2pt"
     echo "  hop-interval: $hy2_hop"
 fi
 }
+
 clhy2bw(){
 if [[ -n $hy2_up && -n $hy2_down ]]; then
     echo "  up: \"$hy2_up Mbps\""
@@ -1591,43 +1782,235 @@ if [[ -n $hy2_up && -n $hy2_down ]]; then
 fi
 }
 
-sbany1(){
-  if [[ "$sbnh" != "1.10" ]]; then
-    echo "\"anytls-$hostname\","
-  fi
-}
-clany1(){
-  if [[ "$sbnh" != "1.10" ]]; then
-    echo "- anytls-$hostname"
-  fi
-}
-sbany2(){
-  if [[ "$sbnh" != "1.10" ]]; then
-    cat <<EOF
-         {
-            "type": "anytls",
-            "tag": "anytls-$hostname",
-            "server": "$sb_an_ip",
-            "server_port": $an_port,
-            "password": "$uuid",
-            "idle_session_check_interval": "30s",
-            "idle_session_timeout": "30s",
-            "min_idle_session": 5,
-            "tls": {
-                "enabled": true,
-                "insecure": $an_ins,
-                "server_name": "$an_name"
-            }
-         },
+# 生成单个 sing-box VLESS 出站节点
+sb_node_vless(){
+local srv="$1" ntag="$2"
+cat <<EOF
+    {
+      "type": "vless",
+      "tag": "$ntag",
+      "server": "$srv",
+      "server_port": $vl_port,
+      "uuid": "$uuid",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "$vl_name",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "$public_key",
+          "short_id": "$short_id"
+        }
+      }
+    },
 EOF
-  fi
 }
-clany2(){
-  if [[ "$sbnh" != "1.10" ]]; then
-    cat <<EOF
-- name: anytls-$hostname
+
+# 生成单个 sing-box VMess 出站节点
+sb_node_vmess(){
+local srv="$1" port="$2" ntag="$3" tls_en="$4" host_sni="$5"
+cat <<EOF
+    {
+      "server": "$srv",
+      "server_port": $port,
+      "tag": "$ntag",
+$(sbvmess_tls "$tls_en" "$host_sni")
+      "transport": {
+        "headers": {
+          "Host": [
+            "$host_sni"
+          ]
+        },
+        "path": "$ws_path",
+        "type": "ws"
+      },
+      "type": "vmess",
+      "security": "auto",
+      "uuid": "$uuid"
+    },
+EOF
+}
+
+# 生成单个 sing-box Hysteria2 出站节点
+sb_node_hy2(){
+local srv="$1" ntag="$2"
+cat <<EOF
+    {
+      "type": "hysteria2",
+      "tag": "$ntag",
+      "server": "$srv",
+$(sbhy2ports)
+$(sbhy2obfs)
+$(sbhy2bw)
+      "password": "$uuid",
+      "tls": {
+        "enabled": true,
+        "server_name": "$hy2_name",
+        "insecure": $hy2_ins,
+        "alpn": [
+          "h3"
+        ]
+      }
+    },
+EOF
+}
+
+# 生成单个 sing-box TUIC5 出站节点
+sb_node_tuic5(){
+local srv="$1" ntag="$2"
+cat <<EOF
+    {
+      "type": "tuic",
+      "tag": "$ntag",
+      "server": "$srv",
+      "server_port": $tu5_port,
+      "uuid": "$uuid",
+      "password": "$uuid",
+      "congestion_control": "bbr",
+      "udp_relay_mode": "native",
+      "udp_over_stream": false,
+      "zero_rtt_handshake": false,
+      "heartbeat": "10s",
+      "tls": {
+        "enabled": true,
+        "server_name": "$tu5_name",
+        "insecure": $tu5_ins,
+        "alpn": [
+          "h3"
+        ]
+      }
+    },
+EOF
+}
+
+# 生成单个 sing-box AnyTLS 出站节点（server 严格使用纯 IP 或域名，不带方括号）
+sb_node_anytls(){
+local srv="$1" ntag="$2"
+cat <<EOF
+    {
+      "type": "anytls",
+      "tag": "$ntag",
+      "server": "$srv",
+      "server_port": $an_port,
+      "password": "$uuid",
+      "idle_session_check_interval": "30s",
+      "idle_session_timeout": "30s",
+      "min_idle_session": 5,
+      "tls": {
+        "enabled": true,
+        "insecure": $an_ins,
+        "server_name": "$an_name"
+      }
+    },
+EOF
+}
+
+# 将节点 tag 列表格式化为严格合法的 JSON 字符串数组项（末项无逗号）
+sb_json_tags(){
+local arr=("$@") i last=$((${#arr[@]} - 1))
+for i in "${!arr[@]}"; do
+if (( i < last )); then
+printf '        "%s",\n' "${arr[$i]}"
+else
+printf '        "%s"\n' "${arr[$i]}"
+fi
+done
+}
+
+# 生成单个 Mihomo/Clash 节点（所有字符串字段严格使用双引号包裹，防止 IPv6 冒号引发 YAML 语法错误）
+cl_node_vless(){
+local srv="$1" nname="$2"
+cat <<EOF
+- name: "$nname"
+  type: vless
+  server: "$srv"
+  port: $vl_port
+  uuid: "$uuid"
+  network: tcp
+  udp: true
+  tls: true
+  flow: xtls-rprx-vision
+  servername: "$vl_name"
+  reality-opts:
+    public-key: "$public_key"
+    short-id: "$short_id"
+  client-fingerprint: chrome
+
+EOF
+}
+
+cl_node_vmess(){
+local srv="$1" port="$2" nname="$3" tls_en="$4" host_sni="$5"
+cat <<EOF
+- name: "$nname"
+  type: vmess
+  server: "$srv"
+  port: $port
+  uuid: "$uuid"
+  alterId: 0
+  cipher: auto
+  udp: true
+  tls: $tls_en
+  network: ws
+  servername: "$host_sni"
+  ws-opts:
+    path: "$ws_path"
+    headers:
+      Host: "$host_sni"
+
+EOF
+}
+
+cl_node_hy2(){
+local srv="$1" nname="$2"
+cat <<EOF
+- name: "$nname"
+  type: hysteria2
+  server: "$srv"
+  port: $hy2_port
+$(clhy2ports)
+  password: "$uuid"
+$(clhy2obfs)
+$(clhy2bw)
+  alpn:
+    - h3
+  sni: "$hy2_name"
+  skip-cert-verify: $hy2_ins
+  fast-open: true
+
+EOF
+}
+
+cl_node_tuic5(){
+local srv="$1" nname="$2"
+cat <<EOF
+- name: "$nname"
+  server: "$srv"
+  port: $tu5_port
+  type: tuic
+  uuid: "$uuid"
+  password: "$uuid"
+  alpn: [h3]
+  disable-sni: false
+  reduce-rtt: true
+  udp-relay-mode: native
+  congestion-controller: bbr
+  sni: "$tu5_name"
+  skip-cert-verify: $tu5_ins
+
+EOF
+}
+
+cl_node_anytls(){
+local srv="$1" nname="$2"
+cat <<EOF
+- name: "$nname"
   type: anytls
-  server: "$cl_an_ip"
+  server: "$srv"
   port: $an_port
   password: "$uuid"
   client-fingerprint: chrome
@@ -1636,12 +2019,132 @@ clany2(){
   idle-session-timeout: 30
   sni: "$an_name"
   skip-cert-verify: $an_ins
+
 EOF
-  fi
 }
 
-sball(){
-cat <<EOF
+# 将节点名称列表格式化为 Mihomo proxy-groups 的 proxies 条目
+cl_yaml_proxies(){
+local n
+for n in "$@"; do
+printf '    - "%s"\n' "$n"
+done
+}
+
+# 检测 Argo 固定与临时隧道运行状态
+local has_argo_gd=0 has_argo_ls=0
+tls=$(sbjq_read /etc/s-box/sb.json '.inbounds[1].tls.enabled')
+if [[ "$tls" = "false" ]]; then
+ps -ef 2>/dev/null | grep -q '[c]loudflared.*run' && has_argo_gd=1
+ps -ef 2>/dev/null | grep "[l]ocalhost:${vm_port}" >/dev/null 2>&1 && has_argo_ls=1
+fi
+
+# 汇总 sing-box 与 Mihomo 节点定义及节点名称列表（双栈自动展开 -v4 / -v6）
+local sb_nodes_buf="" cl_nodes_buf="" i ip tag
+local sb_node_tags=() cl_node_names=()
+
+# 1. VLESS Reality（始终直连 VPS IP）
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+sb_nodes_buf+="$(sb_node_vless "$ip" "vless-$hostname$tag")"$'\n'
+sb_node_tags+=("vless-$hostname$tag")
+cl_nodes_buf+="$(cl_node_vless "$ip" "vless-reality-vision-$hostname$tag")"$'\n'
+cl_node_names+=("vless-reality-vision-$hostname$tag")
+done
+
+# 2. VMess WS
+if [[ "$vm_is_direct_ip" = "1" ]]; then
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+sb_nodes_buf+="$(sb_node_vmess "$ip" "$vm_port" "vmess-$hostname$tag" "$tls" "$vm_name")"$'\n'
+sb_node_tags+=("vmess-$hostname$tag")
+cl_nodes_buf+="$(cl_node_vmess "$ip" "$vm_port" "vmess-ws-$hostname$tag" "$tls" "$vm_name")"$'\n'
+cl_node_names+=("vmess-ws-$hostname$tag")
+done
+else
+sb_nodes_buf+="$(sb_node_vmess "$vmadd_local" "$vm_port" "vmess-$hostname" "$tls" "$vm_name")"$'\n'
+sb_node_tags+=("vmess-$hostname")
+cl_nodes_buf+="$(cl_node_vmess "$vmadd_local" "$vm_port" "vmess-ws-$hostname" "$tls" "$vm_name")"$'\n'
+cl_node_names+=("vmess-ws-$hostname")
+fi
+
+# 3. Hysteria2
+if [[ "$hy2_is_direct_ip" = "1" ]]; then
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+sb_nodes_buf+="$(sb_node_hy2 "$ip" "hy2-$hostname$tag")"$'\n'
+sb_node_tags+=("hy2-$hostname$tag")
+cl_nodes_buf+="$(cl_node_hy2 "$ip" "hysteria2-$hostname$tag")"$'\n'
+cl_node_names+=("hysteria2-$hostname$tag")
+done
+else
+sb_nodes_buf+="$(sb_node_hy2 "$cl_hy2_ip" "hy2-$hostname")"$'\n'
+sb_node_tags+=("hy2-$hostname")
+cl_nodes_buf+="$(cl_node_hy2 "$cl_hy2_ip" "hysteria2-$hostname")"$'\n'
+cl_node_names+=("hysteria2-$hostname")
+fi
+
+# 4. TUIC5
+if [[ "$tu5_is_direct_ip" = "1" ]]; then
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+sb_nodes_buf+="$(sb_node_tuic5 "$ip" "tuic5-$hostname$tag")"$'\n'
+sb_node_tags+=("tuic5-$hostname$tag")
+cl_nodes_buf+="$(cl_node_tuic5 "$ip" "tuic5-$hostname$tag")"$'\n'
+cl_node_names+=("tuic5-$hostname$tag")
+done
+else
+sb_nodes_buf+="$(sb_node_tuic5 "$cl_tu5_ip" "tuic5-$hostname")"$'\n'
+sb_node_tags+=("tuic5-$hostname")
+cl_nodes_buf+="$(cl_node_tuic5 "$cl_tu5_ip" "tuic5-$hostname")"$'\n'
+cl_node_names+=("tuic5-$hostname")
+fi
+
+# 5. AnyTLS（仅 sing-box 1.11+ 支持）
+if [[ "$sbnh" != "1.10" ]]; then
+if [[ "$an_is_direct_ip" = "1" ]]; then
+for i in "${!server_ips_list[@]}"; do
+ip="${server_ips_list[$i]}"
+tag="${server_ip_tags[$i]}"
+sb_nodes_buf+="$(sb_node_anytls "$ip" "anytls-$hostname$tag")"$'\n'
+sb_node_tags+=("anytls-$hostname$tag")
+cl_nodes_buf+="$(cl_node_anytls "$ip" "anytls-$hostname$tag")"$'\n'
+cl_node_names+=("anytls-$hostname$tag")
+done
+else
+sb_nodes_buf+="$(sb_node_anytls "$cl_an_ip" "anytls-$hostname")"$'\n'
+sb_node_tags+=("anytls-$hostname")
+cl_nodes_buf+="$(cl_node_anytls "$cl_an_ip" "anytls-$hostname")"$'\n'
+cl_node_names+=("anytls-$hostname")
+fi
+fi
+
+# 6. Argo 固定隧道节点
+if [[ "$has_argo_gd" = "1" ]]; then
+sb_nodes_buf+="$(sb_node_vmess "$vmadd_argo" 443 "vmess-tls-argo固定-$hostname" "true" "$argogd")"$'\n'
+sb_nodes_buf+="$(sb_node_vmess "$vmadd_argo" 8880 "vmess-argo固定-$hostname" "false" "$argogd")"$'\n'
+sb_node_tags+=("vmess-tls-argo固定-$hostname" "vmess-argo固定-$hostname")
+cl_nodes_buf+="$(cl_node_vmess "$vmadd_argo" 443 "vmess-tls-argo固定-$hostname" "true" "$argogd")"$'\n'
+cl_nodes_buf+="$(cl_node_vmess "$vmadd_argo" 8880 "vmess-argo固定-$hostname" "false" "$argogd")"$'\n'
+cl_node_names+=("vmess-tls-argo固定-$hostname" "vmess-argo固定-$hostname")
+fi
+
+# 7. Argo 临时隧道节点
+if [[ "$has_argo_ls" = "1" ]]; then
+sb_nodes_buf+="$(sb_node_vmess "$vmadd_argo" 443 "vmess-tls-argo临时-$hostname" "true" "$argo")"$'\n'
+sb_nodes_buf+="$(sb_node_vmess "$vmadd_argo" 8880 "vmess-argo临时-$hostname" "false" "$argo")"$'\n'
+sb_node_tags+=("vmess-tls-argo临时-$hostname" "vmess-argo临时-$hostname")
+cl_nodes_buf+="$(cl_node_vmess "$vmadd_argo" 443 "vmess-tls-argo临时-$hostname" "true" "$argo")"$'\n'
+cl_nodes_buf+="$(cl_node_vmess "$vmadd_argo" 8880 "vmess-argo临时-$hostname" "false" "$argo")"$'\n'
+cl_node_names+=("vmess-tls-argo临时-$hostname" "vmess-argo临时-$hostname")
+fi
+
+# 写入 sing-box 客户端配置 /etc/s-box/sbox.json
+cat > /etc/s-box/sbox.json <<EOF
 {
   "log": {
     "level": "info",
@@ -1798,96 +2301,42 @@ cat <<EOF
     }
   },
   "outbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-$hostname",
-      "server": "$server_ipcl",
-      "server_port": $vl_port,
-      "uuid": "$uuid",
-      "flow": "xtls-rprx-vision",
-      "tls": {
-        "enabled": true,
-        "server_name": "$vl_name",
-        "utls": {
-          "enabled": true,
-          "fingerprint": "chrome"
-        },
-      "reality": {
-          "enabled": true,
-          "public_key": "$public_key",
-          "short_id": "$short_id"
-        }
-      }
+${sb_nodes_buf}    {
+      "tag": "proxy",
+      "type": "selector",
+      "default": "auto",
+      "outbounds": [
+$(sb_json_tags "auto" "${sb_node_tags[@]}")
+      ]
     },
-{
-            "server": "$vmadd_local",
-            "server_port": $vm_port,
-            "tag": "vmess-$hostname",
-$(sbvmess_tls "$tls" "$vm_name")
-            "transport": {
-                "headers": {
-                    "Host": [
-                        "$vm_name"
-                    ]
-                },
-                "path": "$ws_path",
-                "type": "ws"
-            },
-            "type": "vmess",
-            "security": "auto",
-            "uuid": "$uuid"
-        },
-
     {
-        "type": "hysteria2",
-        "tag": "hy2-$hostname",
-        "server": "$cl_hy2_ip",
-$(sbhy2ports)
-$(sbhy2obfs)
-$(sbhy2bw)
-        "password": "$uuid",
-        "tls": {
-            "enabled": true,
-            "server_name": "$hy2_name",
-            "insecure": $hy2_ins,
-            "alpn": [
-                "h3"
-            ]
-        }
+      "tag": "auto",
+      "type": "urltest",
+      "outbounds": [
+$(sb_json_tags "${sb_node_tags[@]}")
+      ],
+      "url": "http://www.gstatic.com/generate_204",
+      "interval": "10m",
+      "tolerance": 30,
+      "idle_timeout": "30m"
     },
-        {
-            "type":"tuic",
-            "tag": "tuic5-$hostname",
-            "server": "$cl_tu5_ip",
-            "server_port": $tu5_port,
-            "uuid": "$uuid",
-            "password": "$uuid",
-            "congestion_control": "bbr",
-            "udp_relay_mode": "native",
-            "udp_over_stream": false,
-            "zero_rtt_handshake": false,
-            "heartbeat": "10s",
-            "tls":{
-                "enabled": true,
-                "server_name": "$tu5_name",
-                "insecure": $tu5_ins,
-                "alpn": [
-                    "h3"
-                ]
-            }
-        },
-EOF
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
 }
+EOF
 
-clall(){
-cat <<EOF
+# 写入 Mihomo/Clash 客户端配置 /etc/s-box/clmi.yaml
+cat > /etc/s-box/clmi.yaml <<EOF
 port: 7890
 allow-lan: true
 mode: rule
 log-level: info
 unified-delay: true
 dns:
-  enable: true 
+  enable: true
   listen: "0.0.0.0:1053"
   ipv6: true
   prefer-h3: false
@@ -1918,278 +2367,7 @@ dns:
     - "https://doh.pub/dns-query"
 
 proxies:
-- name: vless-reality-vision-$hostname
-  type: vless
-  server: "$server_ipcl"
-  port: $vl_port
-  uuid: "$uuid"
-  network: tcp
-  udp: true
-  tls: true
-  flow: xtls-rprx-vision
-  servername: "$vl_name"
-  reality-opts:
-    public-key: "$public_key"
-    short-id: "$short_id"
-  client-fingerprint: chrome
-
-- name: vmess-ws-$hostname
-  type: vmess
-  server: "$vmadd_local"
-  port: $vm_port
-  uuid: "$uuid"
-  alterId: 0
-  cipher: auto
-  udp: true
-  tls: $tls
-  network: ws
-  servername: "$vm_name"
-  ws-opts:
-    path: "$ws_path"
-    headers:
-      Host: "$vm_name"
-
-- name: hysteria2-$hostname
-  type: hysteria2
-  server: "$cl_hy2_ip"
-  port: $hy2_port
-$(clhy2ports)
-  password: "$uuid"
-$(clhy2obfs)
-$(clhy2bw)
-  alpn:
-    - h3
-  sni: "$hy2_name"
-  skip-cert-verify: $hy2_ins
-  fast-open: true
-
-- name: tuic5-$hostname
-  server: "$cl_tu5_ip"
-  port: $tu5_port
-  type: tuic
-  uuid: "$uuid"
-  password: "$uuid"
-  alpn: [h3]
-  disable-sni: false
-  reduce-rtt: true
-  udp-relay-mode: native
-  congestion-controller: bbr
-  sni: "$tu5_name"
-  skip-cert-verify: $tu5_ins
-EOF
-}
-
-tls=$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds[1].tls.enabled')
-if ps -ef 2>/dev/null | grep -q '[c]loudflared.*run' && ps -ef 2>/dev/null | grep "[l]ocalhost:$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds[1].listen_port')" >/dev/null 2>&1 && [ "$tls" = "false" ]; then
-cat > /etc/s-box/sbox.json <<EOF
-$(sball)
-$(sbany2)
-{
-            "server": "$vmadd_argo",
-            "server_port": 443,
-            "tag": "vmess-tls-argo固定-$hostname",
-            "tls": {
-                "enabled": true,
-                "server_name": "$argogd",
-                "insecure": false,
-                "utls": {
-                    "enabled": true,
-                    "fingerprint": "chrome"
-                }
-            },
-            "transport": {
-                "headers": {
-                    "Host": [
-                        "$argogd"
-                    ]
-                },
-                "path": "$ws_path",
-                "type": "ws"
-            },
-            "type": "vmess",
-            "security": "auto",
-            "uuid": "$uuid"
-        },
-{
-            "server": "$vmadd_argo",
-            "server_port": 8880,
-            "tag": "vmess-argo固定-$hostname",
-            "tls": {
-                "enabled": false
-            },
-            "transport": {
-                "headers": {
-                    "Host": [
-                        "$argogd"
-                    ]
-                },
-                "path": "$ws_path",
-                "type": "ws"
-            },
-            "type": "vmess",
-            "security": "auto",
-            "uuid": "$uuid"
-        },
-{
-            "server": "$vmadd_argo",
-            "server_port": 443,
-            "tag": "vmess-tls-argo临时-$hostname",
-            "tls": {
-                "enabled": true,
-                "server_name": "$argo",
-                "insecure": false,
-                "utls": {
-                    "enabled": true,
-                    "fingerprint": "chrome"
-                }
-            },
-            "transport": {
-                "headers": {
-                    "Host": [
-                        "$argo"
-                    ]
-                },
-                "path": "$ws_path",
-                "type": "ws"
-            },
-            "type": "vmess",
-            "security": "auto",
-            "uuid": "$uuid"
-        },
-{
-            "server": "$vmadd_argo",
-            "server_port": 8880,
-            "tag": "vmess-argo临时-$hostname",
-            "tls": {
-                "enabled": false
-            },
-            "transport": {
-                "headers": {
-                    "Host": [
-                        "$argo"
-                    ]
-                },
-                "path": "$ws_path",
-                "type": "ws"
-            },
-            "type": "vmess",
-            "security": "auto",
-            "uuid": "$uuid"
-        },
-        {
-            "tag": "proxy",
-            "type": "selector",
-			"default": "auto",
-            "outbounds": [
-        "auto",
-        "vless-$hostname",
-        "vmess-$hostname",
-        "hy2-$hostname",
-        "tuic5-$hostname",
-$(sbany1)
-        "vmess-tls-argo固定-$hostname",
-        "vmess-argo固定-$hostname",
-        "vmess-tls-argo临时-$hostname",
-        "vmess-argo临时-$hostname"
-            ]
-        },
-        {
-            "tag": "auto",
-            "type": "urltest",
-            "outbounds": [
-        "vless-$hostname",
-        "vmess-$hostname",
-        "hy2-$hostname",
-        "tuic5-$hostname",
-$(sbany1)
-        "vmess-tls-argo固定-$hostname",
-        "vmess-argo固定-$hostname",
-        "vmess-tls-argo临时-$hostname",
-        "vmess-argo临时-$hostname"
-            ],
-            "url": "http://www.gstatic.com/generate_204",
-            "interval": "10m",
-            "tolerance": 30,
-            "idle_timeout": "30m"
-        },
-        {
-            "type": "direct",
-            "tag": "direct"
-        }
-    ]
-}
-EOF
-
-cat > /etc/s-box/clmi.yaml <<EOF
-$(clall)
-
-$(clany2)
-
-- name: vmess-tls-argo固定-$hostname                         
-  type: vmess
-  server: $vmadd_argo                        
-  port: 443                                     
-  uuid: $uuid       
-  alterId: 0
-  cipher: auto
-  udp: true
-  tls: true
-  network: ws
-  servername: $argogd                    
-  ws-opts:
-    path: "$ws_path"                             
-    headers:
-      Host: $argogd
-
-
-- name: vmess-argo固定-$hostname                         
-  type: vmess
-  server: $vmadd_argo                        
-  port: 8880                                     
-  uuid: $uuid       
-  alterId: 0
-  cipher: auto
-  udp: true
-  tls: false
-  network: ws
-  servername: $argogd                    
-  ws-opts:
-    path: "$ws_path"                             
-    headers:
-      Host: $argogd
-
-- name: vmess-tls-argo临时-$hostname                         
-  type: vmess
-  server: $vmadd_argo                        
-  port: 443                                     
-  uuid: $uuid       
-  alterId: 0
-  cipher: auto
-  udp: true
-  tls: true
-  network: ws
-  servername: $argo                    
-  ws-opts:
-    path: "$ws_path"                             
-    headers:
-      Host: $argo
-
-- name: vmess-argo临时-$hostname                         
-  type: vmess
-  server: $vmadd_argo                        
-  port: 8880                                     
-  uuid: $uuid       
-  alterId: 0
-  cipher: auto
-  udp: true
-  tls: false
-  network: ws
-  servername: $argo                    
-  ws-opts:
-    path: "$ws_path"                             
-    headers:
-      Host: $argo 
-
+${cl_nodes_buf}
 proxy-groups:
 - name: 负载均衡
   type: load-balance
@@ -2197,15 +2375,7 @@ proxy-groups:
   interval: 300
   strategy: round-robin
   proxies:
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    - vmess-tls-argo固定-$hostname
-    - vmess-argo固定-$hostname
-    - vmess-tls-argo临时-$hostname
-    - vmess-argo临时-$hostname
+$(cl_yaml_proxies "${cl_node_names[@]}")
 
 - name: 自动选择
   type: url-test
@@ -2213,490 +2383,22 @@ proxy-groups:
   interval: 300
   tolerance: 50
   proxies:
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    - vmess-tls-argo固定-$hostname
-    - vmess-argo固定-$hostname
-    - vmess-tls-argo临时-$hostname
-    - vmess-argo临时-$hostname
-    
+$(cl_yaml_proxies "${cl_node_names[@]}")
+
 - name: 🌍选择代理节点
   type: select
   proxies:
-    - 负载均衡                                         
+    - 负载均衡
     - 自动选择
     - DIRECT
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    - vmess-tls-argo固定-$hostname
-    - vmess-argo固定-$hostname
-    - vmess-tls-argo临时-$hostname
-    - vmess-argo临时-$hostname
+$(cl_yaml_proxies "${cl_node_names[@]}")
+
 rules:
   - GEOIP,LAN,DIRECT
   - GEOSITE,CN,DIRECT
   - GEOIP,CN,DIRECT
   - MATCH,🌍选择代理节点
 EOF
-
-elif ! ps -ef 2>/dev/null | grep -q '[c]loudflared.*run' && ps -ef 2>/dev/null | grep "[l]ocalhost:$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds[1].listen_port')" >/dev/null 2>&1 && [ "$tls" = "false" ]; then
-cat > /etc/s-box/sbox.json <<EOF
-$(sball)
-$(sbany2)
-{
-            "server": "$vmadd_argo",
-            "server_port": 443,
-            "tag": "vmess-tls-argo临时-$hostname",
-            "tls": {
-                "enabled": true,
-                "server_name": "$argo",
-                "insecure": false,
-                "utls": {
-                    "enabled": true,
-                    "fingerprint": "chrome"
-                }
-            },
-            "transport": {
-                "headers": {
-                    "Host": [
-                        "$argo"
-                    ]
-                },
-                "path": "$ws_path",
-                "type": "ws"
-            },
-            "type": "vmess",
-            "security": "auto",
-            "uuid": "$uuid"
-        },
-{
-            "server": "$vmadd_argo",
-            "server_port": 8880,
-            "tag": "vmess-argo临时-$hostname",
-            "tls": {
-                "enabled": false
-            },
-            "transport": {
-                "headers": {
-                    "Host": [
-                        "$argo"
-                    ]
-                },
-                "path": "$ws_path",
-                "type": "ws"
-            },
-            "type": "vmess",
-            "security": "auto",
-            "uuid": "$uuid"
-        },
-        {
-            "tag": "proxy",
-            "type": "selector",
-			"default": "auto",
-            "outbounds": [
-        "auto",
-        "vless-$hostname",
-        "vmess-$hostname",
-        "hy2-$hostname",
-        "tuic5-$hostname",
-$(sbany1)
-        "vmess-tls-argo临时-$hostname",
-        "vmess-argo临时-$hostname"
-            ]
-        },
-        {
-            "tag": "auto",
-            "type": "urltest",
-            "outbounds": [
-        "vless-$hostname",
-        "vmess-$hostname",
-        "hy2-$hostname",
-        "tuic5-$hostname",
-$(sbany1)
-        "vmess-tls-argo临时-$hostname",
-        "vmess-argo临时-$hostname"
-            ],
-            "url": "http://www.gstatic.com/generate_204",
-            "interval": "10m",
-            "tolerance": 30,
-            "idle_timeout": "30m"
-        },
-        {
-            "type": "direct",
-            "tag": "direct"
-        }
-    ]
-}
-EOF
-
-cat > /etc/s-box/clmi.yaml <<EOF
-$(clall)
-
-
-
-
-
-
-
-
-$(clany2)
-
-- name: vmess-tls-argo临时-$hostname                         
-  type: vmess
-  server: $vmadd_argo                        
-  port: 443                                     
-  uuid: $uuid       
-  alterId: 0
-  cipher: auto
-  udp: true
-  tls: true
-  network: ws
-  servername: $argo                    
-  ws-opts:
-    path: "$ws_path"                             
-    headers:
-      Host: $argo
-
-- name: vmess-argo临时-$hostname                         
-  type: vmess
-  server: $vmadd_argo                        
-  port: 8880                                     
-  uuid: $uuid       
-  alterId: 0
-  cipher: auto
-  udp: true
-  tls: false
-  network: ws
-  servername: $argo                    
-  ws-opts:
-    path: "$ws_path"                             
-    headers:
-      Host: $argo 
-
-proxy-groups:
-- name: 负载均衡
-  type: load-balance
-  url: https://www.gstatic.com/generate_204
-  interval: 300
-  strategy: round-robin
-  proxies:
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    - vmess-tls-argo临时-$hostname
-    - vmess-argo临时-$hostname
-
-- name: 自动选择
-  type: url-test
-  url: https://www.gstatic.com/generate_204
-  interval: 300
-  tolerance: 50
-  proxies:
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    - vmess-tls-argo临时-$hostname
-    - vmess-argo临时-$hostname
-    
-- name: 🌍选择代理节点
-  type: select
-  proxies:
-    - 负载均衡                                         
-    - 自动选择
-    - DIRECT
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    - vmess-tls-argo临时-$hostname
-    - vmess-argo临时-$hostname
-rules:
-  - GEOIP,LAN,DIRECT
-  - GEOSITE,CN,DIRECT
-  - GEOIP,CN,DIRECT
-  - MATCH,🌍选择代理节点
-EOF
-
-elif ps -ef 2>/dev/null | grep -q '[c]loudflared.*run' && ! ps -ef 2>/dev/null | grep "[l]ocalhost:$(sed -E 's:(^|[[:space:]])//.*::' /etc/s-box/sb.json | jq -r '.inbounds[1].listen_port')" >/dev/null 2>&1 && [ "$tls" = "false" ]; then
-cat > /etc/s-box/sbox.json <<EOF
-$(sball)
-$(sbany2)
-{
-            "server": "$vmadd_argo",
-            "server_port": 443,
-            "tag": "vmess-tls-argo固定-$hostname",
-            "tls": {
-                "enabled": true,
-                "server_name": "$argogd",
-                "insecure": false,
-                "utls": {
-                    "enabled": true,
-                    "fingerprint": "chrome"
-                }
-            },
-            "transport": {
-                "headers": {
-                    "Host": [
-                        "$argogd"
-                    ]
-                },
-                "path": "$ws_path",
-                "type": "ws"
-            },
-            "type": "vmess",
-            "security": "auto",
-            "uuid": "$uuid"
-        },
-{
-            "server": "$vmadd_argo",
-            "server_port": 8880,
-            "tag": "vmess-argo固定-$hostname",
-            "tls": {
-                "enabled": false
-            },
-            "transport": {
-                "headers": {
-                    "Host": [
-                        "$argogd"
-                    ]
-                },
-                "path": "$ws_path",
-                "type": "ws"
-            },
-            "type": "vmess",
-            "security": "auto",
-            "uuid": "$uuid"
-        },
-        {
-            "tag": "proxy",
-            "type": "selector",
-			"default": "auto",
-            "outbounds": [
-        "auto",
-        "vless-$hostname",
-        "vmess-$hostname",
-        "hy2-$hostname",
-        "tuic5-$hostname",
-$(sbany1)
-        "vmess-tls-argo固定-$hostname",
-        "vmess-argo固定-$hostname"
-            ]
-        },
-        {
-            "tag": "auto",
-            "type": "urltest",
-            "outbounds": [
-        "vless-$hostname",
-        "vmess-$hostname",
-        "hy2-$hostname",
-        "tuic5-$hostname",
-$(sbany1)
-        "vmess-tls-argo固定-$hostname",
-        "vmess-argo固定-$hostname"
-            ],
-            "url": "http://www.gstatic.com/generate_204",
-            "interval": "10m",
-            "tolerance": 30,
-            "idle_timeout": "30m"
-        },
-        {
-            "type": "direct",
-            "tag": "direct"
-        }
-    ]
-}
-EOF
-
-cat > /etc/s-box/clmi.yaml <<EOF
-$(clall)
-
-
-
-
-
-
-$(clany2)
-
-- name: vmess-tls-argo固定-$hostname                         
-  type: vmess
-  server: $vmadd_argo                        
-  port: 443                                     
-  uuid: $uuid       
-  alterId: 0
-  cipher: auto
-  udp: true
-  tls: true
-  network: ws
-  servername: $argogd                    
-  ws-opts:
-    path: "$ws_path"                             
-    headers:
-      Host: $argogd
-
-- name: vmess-argo固定-$hostname                         
-  type: vmess
-  server: $vmadd_argo                        
-  port: 8880                                     
-  uuid: $uuid       
-  alterId: 0
-  cipher: auto
-  udp: true
-  tls: false
-  network: ws
-  servername: $argogd                    
-  ws-opts:
-    path: "$ws_path"                             
-    headers:
-      Host: $argogd
-
-proxy-groups:
-- name: 负载均衡
-  type: load-balance
-  url: https://www.gstatic.com/generate_204
-  interval: 300
-  strategy: round-robin
-  proxies:
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    - vmess-tls-argo固定-$hostname
-    - vmess-argo固定-$hostname
-
-- name: 自动选择
-  type: url-test
-  url: https://www.gstatic.com/generate_204
-  interval: 300
-  tolerance: 50
-  proxies:
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    - vmess-tls-argo固定-$hostname
-    - vmess-argo固定-$hostname
-    
-- name: 🌍选择代理节点
-  type: select
-  proxies:
-    - 负载均衡                                         
-    - 自动选择
-    - DIRECT
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    - vmess-tls-argo固定-$hostname
-    - vmess-argo固定-$hostname
-rules:
-  - GEOIP,LAN,DIRECT
-  - GEOSITE,CN,DIRECT
-  - GEOIP,CN,DIRECT
-  - MATCH,🌍选择代理节点
-EOF
-
-else
-cat > /etc/s-box/sbox.json <<EOF
-$(sball)
-$(sbany2)
-        {
-            "tag": "proxy",
-            "type": "selector",
-			"default": "auto",
-            "outbounds": [
-        "auto",
-        "vless-$hostname",
-$(sbany1)
-        "vmess-$hostname",
-        "hy2-$hostname",
-        "tuic5-$hostname"
-            ]
-        },
-        {
-            "tag": "auto",
-            "type": "urltest",
-            "outbounds": [
-        "vless-$hostname",
-$(sbany1)
-        "vmess-$hostname",
-        "hy2-$hostname",
-        "tuic5-$hostname"
-            ],
-            "url": "http://www.gstatic.com/generate_204",
-            "interval": "10m",
-            "tolerance": 30,
-            "idle_timeout": "30m"
-        },
-        {
-            "type": "direct",
-            "tag": "direct"
-        }
-    ]
-}
-EOF
-
-cat > /etc/s-box/clmi.yaml <<EOF
-$(clall)
-
-$(clany2)
-
-proxy-groups:
-- name: 负载均衡
-  type: load-balance
-  url: https://www.gstatic.com/generate_204
-  interval: 300
-  strategy: round-robin
-  proxies:
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-
-- name: 自动选择
-  type: url-test
-  url: https://www.gstatic.com/generate_204
-  interval: 300
-  tolerance: 50
-  proxies:
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-    
-- name: 🌍选择代理节点
-  type: select
-  proxies:
-    - 负载均衡                                         
-    - 自动选择
-    - DIRECT
-    - vless-reality-vision-$hostname                              
-    - vmess-ws-$hostname
-    - hysteria2-$hostname
-    - tuic5-$hostname
-    $(clany1)
-rules:
-  - GEOIP,LAN,DIRECT
-  - GEOSITE,CN,DIRECT
-  - GEOIP,CN,DIRECT
-  - MATCH,🌍选择代理节点
-EOF
-fi
 }
 
 cfargo_ym(){
@@ -2910,16 +2612,14 @@ if natmsg=$(sbnatconflict 50000 60000 "$port_hy2"); then
 yellow "跳过自动添加 Hy2 端口跳跃 (50000-60000)：$natmsg"
 else
 sbnatclr 50000:60000
-iptables -t nat -A PREROUTING -p udp --dport 50000:60000 -j DNAT --to-destination :$port_hy2 2>/dev/null
-ip6tables -t nat -A PREROUTING -p udp --dport 50000:60000 -j DNAT --to-destination :$port_hy2 2>/dev/null
+sbnatadd 50000:60000 "$port_hy2"
 blue "已自动为Hysteria2添加端口跳跃范围：50000-60000"
 fi
 if natmsg=$(sbnatconflict 40000 49999 "$port_tu"); then
 yellow "跳过自动添加 Tuic5 端口跳跃 (40000-49999)：$natmsg"
 else
 sbnatclr 40000:49999
-iptables -t nat -A PREROUTING -p udp --dport 40000:49999 -j DNAT --to-destination :$port_tu 2>/dev/null
-ip6tables -t nat -A PREROUTING -p udp --dport 40000:49999 -j DNAT --to-destination :$port_tu 2>/dev/null
+sbnatadd 40000:49999 "$port_tu"
 blue "已自动为Tuic5添加端口跳跃范围：40000-49999"
 fi
 sbfwsave
@@ -3081,8 +2781,7 @@ if natmsg=$(sbnatconflict $b $c $port); then
 red "端口范围冲突：$natmsg" && fports && return
 fi
 sbnatclr $rangeport
-iptables -t nat -A PREROUTING -p udp --dport $rangeport -j DNAT --to-destination :$port
-ip6tables -t nat -A PREROUTING -p udp --dport $rangeport -j DNAT --to-destination :$port
+sbnatadd "$rangeport" "$port"
 sbfwsave
 blue "已确认转发的端口范围：$rangeport"
 else
@@ -3100,8 +2799,7 @@ if natmsg=$(sbnatconflict $onlyport $onlyport $port); then
 red "端口冲突：$natmsg" && fport && return
 fi
 sbnatclr $onlyport
-iptables -t nat -A PREROUTING -p udp --dport $onlyport -j DNAT --to-destination :$port
-ip6tables -t nat -A PREROUTING -p udp --dport $onlyport -j DNAT --to-destination :$port
+sbnatadd "$onlyport" "$port"
 sbfwsave
 blue "已确认转发的端口：$onlyport"
 else
@@ -3112,21 +2810,27 @@ echo
 
 hy2deports(){
 allports
-local p
+local p t r
 IFS=',' read -ra ports <<< "$hy2_ports"
 for p in "${ports[@]}"; do
-iptables -t nat -D PREROUTING -p udp --dport "$p" -j DNAT --to-destination ":$hy2_port" 2>/dev/null
-ip6tables -t nat -D PREROUTING -p udp --dport "$p" -j DNAT --to-destination ":$hy2_port" 2>/dev/null
+for t in iptables ip6tables; do
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-p udp .*--dport $p .*(-j REDIRECT --to-ports $hy2_port|-j DNAT --to-destination (\[::\])?:$hy2_port)$" | while read -r r; do
+eval "$t -t nat -D ${r#-A }" >/dev/null 2>&1
+done
+done
 done
 sbfwsave
 }
 tu5deports(){
 allports
-local p
+local p t r
 IFS=',' read -ra ports <<< "$tu5_ports"
 for p in "${ports[@]}"; do
-iptables -t nat -D PREROUTING -p udp --dport "$p" -j DNAT --to-destination ":$tu5_port" 2>/dev/null
-ip6tables -t nat -D PREROUTING -p udp --dport "$p" -j DNAT --to-destination ":$tu5_port" 2>/dev/null
+for t in iptables ip6tables; do
+$t -t nat -S PREROUTING 2>/dev/null | grep -E -- "-p udp .*--dport $p .*(-j REDIRECT --to-ports $tu5_port|-j DNAT --to-destination (\[::\])?:$tu5_port)$" | while read -r r; do
+eval "$t -t nat -D ${r#-A }" >/dev/null 2>&1
+done
+done
 done
 sbfwsave
 }
@@ -3537,22 +3241,30 @@ mkdir -p "/root/websbox/${curtok}"
 ln -sf /etc/s-box/clmi.yaml "/root/websbox/${curtok}/clmi.yaml"
 ln -sf /etc/s-box/sbox.json "/root/websbox/${curtok}/sbox.json"
 ln -sf /etc/s-box/jhsub.txt "/root/websbox/${curtok}/jhsub.txt"
-if command -v apk >/dev/null 2>&1; then
-busybox-extras httpd -f -p "$curport" -h /root/websbox > /dev/null 2>&1 &
-else
-busybox httpd -f -p "$curport" -h /root/websbox > /dev/null 2>&1 &
+# 优先尝试 IPv6/双栈监听 [::]:port，若环境不支持则回退为默认监听
+local httpd_bin="busybox" hpid
+command -v apk >/dev/null 2>&1 && httpd_bin="busybox-extras"
+$httpd_bin httpd -f -p "[::]:$curport" -h /root/websbox > /dev/null 2>&1 &
+hpid=$!
+sleep 0.5
+if ! kill -0 "$hpid" 2>/dev/null; then
+$httpd_bin httpd -f -p "$curport" -h /root/websbox > /dev/null 2>&1 &
 fi
-sleep 2
+sleep 1.5
 if command -v apk >/dev/null 2>&1; then
 cat > /etc/local.d/alpinesub.start <<'EOF'
 #!/bin/bash
 sleep 10
-busybox-extras httpd -f -p "$(cat /etc/s-box/subport.log 2>/dev/null)" -h /root/websbox > /dev/null 2>&1 &
+p=$(cat /etc/s-box/subport.log 2>/dev/null)
+busybox-extras httpd -f -p "[::]:$p" -h /root/websbox > /dev/null 2>&1 &
+hpid=$!
+sleep 0.5
+if ! kill -0 "$hpid" 2>/dev/null; then busybox-extras httpd -f -p "$p" -h /root/websbox > /dev/null 2>&1 & fi
 EOF
 chmod +x /etc/local.d/alpinesub.start
 rc-update add local default >/dev/null 2>&1
 else
-cron_update 'websbox' '@reboot sleep 10 && /bin/bash -c "busybox httpd -f -p \"$(cat /etc/s-box/subport.log 2>/dev/null)\" -h /root/websbox > /dev/null 2>&1 &"'
+cron_update 'websbox' '@reboot sleep 10 && /bin/bash -c "p=\$(cat /etc/s-box/subport.log 2>/dev/null); busybox httpd -f -p \"[::]:\$p\" -h /root/websbox > /dev/null 2>&1 & hpid=\$!; sleep 0.5; if ! kill -0 \"\$hpid\" 2>/dev/null; then busybox httpd -f -p \"\$p\" -h /root/websbox > /dev/null 2>&1 & fi"'
 fi
 sbfwre
 sbshare > /dev/null 2>&1
@@ -3733,9 +3445,9 @@ response=$(curl -sL --tlsv1.3 --connect-timeout 3 --max-time 6 \
 -H 'CF-Client-Version: a-7.21-0721' \
 -H 'Content-Type: application/json' \
 -d "{\"key\":\"${pub_b64}\",\"tos\":\"$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')\"}")
-v6=$(echo "$response" | jq -r '.config.interface.addresses.v6 // empty' 2>/dev/null)
+warp_v6=$(echo "$response" | jq -r '.config.interface.addresses.v6 // empty' 2>/dev/null)
 client_id=$(echo "$response" | jq -r '.config.client_id // empty' 2>/dev/null)
-if [[ -n "$priv_b64" && -n "$v6" && -n "$client_id" ]]; then
+if [[ -n "$priv_b64" && -n "$warp_v6" && -n "$client_id" ]]; then
 pvk="$priv_b64"
 res_hex=$(printf '%s' "$client_id" | base64 -d 2>/dev/null | od -An -tx1 | tr -d '[:space:]')
 if [[ ${#res_hex} -ge 6 ]]; then
@@ -3747,12 +3459,12 @@ else
 res="[0,0,0]"
 fi
 else
-v6="2606:4700:110:860e:738f:b37:f15:d38d"
+warp_v6="2606:4700:110:860e:738f:b37:f15:d38d"
 pvk="g9I2sgUH6OCbIBTehkEfVEnuvInHYZvPOFhWchMLSc4="
 res="[33,217,129]"
 fi
 blue "Private_key私钥：$pvk"
-blue "IPV6地址：$v6"
+blue "IPV6地址：$warp_v6"
 blue "reserved值：$res"
 }
 
@@ -3776,7 +3488,7 @@ green "当前warp-wireguard可更换的参数如下："
 green "Private_key私钥：$wgprkey"
 green "IPV6地址：$wgipv6"
 green "Reserved值：$wgres"
-green "对端IP：$wgip:$wgpo"
+green "对端IP：$(fmt_host_port "$wgip" "$wgpo")"
 echo
 yellow "1：更换warp-wireguard账户"
 yellow "0：返回上层"
@@ -3788,7 +3500,7 @@ echo
 readp "输入自定义Private_key (回车使用上方新生成私钥)：" new_pvk
 new_pvk=${new_pvk:-$pvk}
 readp "输入自定义IPV6地址 (回车使用上方新生成地址)：" new_v6
-new_v6=${new_v6:-$v6}
+new_v6=${new_v6:-$warp_v6}
 new_v6="${new_v6%%/*}"
 readp "输入自定义Reserved值 (格式：数字,数字,数字，回车跳过则使用0,0,0)：" new_res
 if [ -z "$new_res" ]; then
@@ -4480,13 +4192,34 @@ echo -e "🚀【    Anytls     】${yellow}端口:$an_port  证书形式:$an_zs$
 fi
 if [ -s /etc/s-box/subport.log ]; then
 showsubport=$(cat /etc/s-box/subport.log)
-if ps -ef 2>/dev/null | grep -E "[h]ttpd.*-p[[:space:]]*${showsubport}.*websbox" >/dev/null; then
+if ps -ef 2>/dev/null | grep -E "[h]ttpd.*-p[[:space:]]*(\[::\]:)?${showsubport}.*websbox" >/dev/null; then
 showsubtoken=$(cat /etc/s-box/subtoken.log 2>/dev/null)
+sub_v4=$(tr -d '[:space:]' < /etc/s-box/server_ipv4.log 2>/dev/null)
+sub_v6=$(tr -d '[:space:]' < /etc/s-box/server_ipv6.log 2>/dev/null)
+is_valid_ipv4 "$sub_v4" || sub_v4=""
+is_valid_ipv6 "$sub_v6" || sub_v6=""
+if [[ -z "$sub_v4" && -z "$sub_v6" ]]; then
 subip=$(cat /etc/s-box/server_ip.log 2>/dev/null)
+if [[ -n "$subip" ]]; then
 suburl="$subip:$showsubport/$showsubtoken"
 echo "Clash/Mihomo本地IP订阅地址：http://$suburl/clmi.yaml"
 echo "Sing-box本地IP订阅地址：http://$suburl/sbox.json"
 echo "聚合协议本地IP订阅地址：http://$suburl/jhsub.txt"
+fi
+else
+if [[ -n "$sub_v4" ]]; then
+suburl_v4="$sub_v4:$showsubport/$showsubtoken"
+echo "Clash/Mihomo本地IPv4订阅地址：http://$suburl_v4/clmi.yaml"
+echo "Sing-box本地IPv4订阅地址：http://$suburl_v4/sbox.json"
+echo "聚合协议本地IPv4订阅地址：http://$suburl_v4/jhsub.txt"
+fi
+if [[ -n "$sub_v6" ]]; then
+suburl_v6="[$sub_v6]:$showsubport/$showsubtoken"
+echo "Clash/Mihomo本地IPv6订阅地址：http://$suburl_v6/clmi.yaml"
+echo "Sing-box本地IPv6订阅地址：http://$suburl_v6/sbox.json"
+echo "聚合协议本地IPv6订阅地址：http://$suburl_v6/jhsub.txt"
+fi
+fi
 fi
 fi
 if [ "$argoym" = "已开启" ]; then
@@ -4587,9 +4320,11 @@ ps -ef | grep '[s]bwpph' | awk '{print $2}' | xargs kill 2>/dev/null
 v4v6 force
 if [[ -n $v4 ]]; then
 sw46=4
+wp_ep="162.159.192.1:2408"
 else
 red "IPV4不存在，确保安装过WARP-IPV4模式"
 sw46=6
+wp_ep="[2606:4700:d0::a29f:c001]:2408"
 fi
 echo
 readp "设置WARP-plus-Socks5端口（回车跳过端口默认40000）：" port
@@ -4627,14 +4362,14 @@ yellow "0：返回上层"
 readp "请选择【0-3】：" menu
 if [ "$menu" = "1" ]; then
 wpph_ins || return 1
-nohup /etc/s-box/sbwpph -b 127.0.0.1:$port -$sw46 --endpoint 162.159.192.1:2408 >/dev/null 2>&1 &
+nohup /etc/s-box/sbwpph -b 127.0.0.1:$port -$sw46 --endpoint "$wp_ep" >/dev/null 2>&1 &
 green "申请IP中……请稍等……" && sleep 20
 resv1=$(curl -s --connect-timeout 2 -m 3 --socks5 localhost:$port https://icanhazip.com 2>/dev/null)
 resv2=$(curl -s --connect-timeout 2 -m 3 -x socks5h://localhost:$port https://icanhazip.com 2>/dev/null)
 if [[ -z $resv1 && -z $resv2 ]]; then
 red "WARP-plus-Socks5的IP获取失败" && wpph_unins && exit
 else
-echo "/etc/s-box/sbwpph -b 127.0.0.1:$port -$sw46 --endpoint 162.159.192.1:2408" > /etc/s-box/sbwpph.log
+echo "/etc/s-box/sbwpph -b 127.0.0.1:$port -$sw46 --endpoint $wp_ep" > /etc/s-box/sbwpph.log
 wpph_autostart
 green "WARP-plus-Socks5的IP获取成功，可进行Socks5代理分流"
 fi
@@ -4675,14 +4410,14 @@ echo '
 美国（US）
 '
 readp "可选择国家地区（输入末尾两个大写字母，如美国，则输入US）：" guojia
-nohup /etc/s-box/sbwpph -b 127.0.0.1:$port --cfon --country $guojia -$sw46 --endpoint 162.159.192.1:2408 >/dev/null 2>&1 &
+nohup /etc/s-box/sbwpph -b 127.0.0.1:$port --cfon --country $guojia -$sw46 --endpoint "$wp_ep" >/dev/null 2>&1 &
 green "申请IP中……请稍等……" && sleep 20
 resv1=$(curl -s --connect-timeout 2 -m 3 --socks5 localhost:$port https://icanhazip.com 2>/dev/null)
 resv2=$(curl -s --connect-timeout 2 -m 3 -x socks5h://localhost:$port https://icanhazip.com 2>/dev/null)
 if [[ -z $resv1 && -z $resv2 ]]; then
 red "WARP-plus-Socks5的IP获取失败，尝试换个国家地区吧" && wpph_unins && exit
 else
-echo "/etc/s-box/sbwpph -b 127.0.0.1:$port --cfon --country $guojia -$sw46 --endpoint 162.159.192.1:2408" > /etc/s-box/sbwpph.log
+echo "/etc/s-box/sbwpph -b 127.0.0.1:$port --cfon --country $guojia -$sw46 --endpoint $wp_ep" > /etc/s-box/sbwpph.log
 wpph_autostart
 green "WARP-plus-Socks5的IP获取成功，可进行Socks5代理分流"
 fi
@@ -4740,7 +4475,7 @@ green "11. 一键原版BBR+FQ加速"
 green "12. 管理 Acme 申请域名IP证书"
 green "13. 管理 Warp 查看Netflix/ChatGPT解锁情况"
 green "14. 添加 WARP-plus-Socks5 代理模式 【本地Warp/多地区Psiphon-VPN】"
-green "15. 更换IP刷新本地IP、调整IPV4/IPV6配置输出"
+green "15. 更换IP刷新本地IPv4/IPV6，更新双栈配置输出"
 white "----------------------------------------------------------------------------------"
 green "16. Sing-box-yg脚本使用说明书"
 white "----------------------------------------------------------------------------------"
