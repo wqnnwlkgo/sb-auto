@@ -1065,7 +1065,7 @@ cat > /etc/s-box/sb10.json <<EOF
 {
 "log": {
     "disabled": false,
-    "level": "info",
+    "level": "warn",
     "timestamp": true
   },
   "inbounds": [
@@ -1309,7 +1309,7 @@ cat > /etc/s-box/sb11.json <<EOF
 {
 "log": {
     "disabled": false,
-    "level": "info",
+    "level": "warn",
     "timestamp": true
   },
   "inbounds": [
@@ -1787,8 +1787,8 @@ cmhy2pt=
 sbhy2pt=
 fi
 hy2_hop=15
-hy2_up=50
-hy2_down=200
+hy2_up=30
+hy2_down=80
 if [[ -s /etc/s-box/hy2_bw.txt ]]; then
 hy2_up=$(awk '{print $1}' /etc/s-box/hy2_bw.txt)
 hy2_down=$(awk '{print $2}' /etc/s-box/hy2_bw.txt)
